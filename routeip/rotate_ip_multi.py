@@ -86,7 +86,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Oracle Cloud OCI 自动更换临时公网 IP 脚本 (多账号/多实例通用版)")
     parser.add_argument("--profile", default="DEFAULT", help="OCI 配置文件中的 Profile 名称 (默认: DEFAULT)")
     parser.add_argument("--instance-id", required=True, help="Oracle VPS 实例的 OCID")
-    parser.add_argument("--config-file", default="/home/ubuntu/.oci/config", help="OCI 配置文件路径 (默认: /home/ubuntu/.oci/config)")
+    parser.add_argument("--config-file", default="/home/xyz/.oci/config", help="OCI 配置文件路径 (默认: /home/ubuntu/.oci/config)")
 
     args = parser.parse_args()
 

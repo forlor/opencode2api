@@ -18,7 +18,7 @@ nodes:
   - name: "vps-node-sg-2"
     lan_url: "http://100.96.0.3:22578" # VPS 1 局域网 Nginx 入口
     supports_ip_change: true
-    ip_change_command: "bash /app/scripts/change_ip_vps3.sh"
+    ip_change_command: "/home/xyz/project/opencode2api/venv/bin/python /home/xyz/project/opencode2api/routeip/rotate_ip_multi.py --profile DEFAULT --instance-id ocid1.instance.oc1.ap-singapore-1.anzwsljr2szbtcic7he2jeh6ffh4rfctwd2vvzj6mq7unnsmups74whuj3ta"
     cooldown_duration: "30m"
   - name: "vps-node-cc1"
     lan_url: "http://100.96.0.8:22578"
@@ -35,15 +35,15 @@ nodes:
   - name: "vps-node-jp2"
     lan_url: "http://100.96.0.6:22578"
     supports_ip_change: true
-    ip_change_command: "bash /app/scripts/change_ip_vps3.sh"
+    ip_change_command: "/home/xyz/project/opencode2api/venv/bin/python /home/xyz/project/opencode2api/routeip/rotate_ip_multi.py --profile JP --instance-id ocid1.instance.oc1.ap-tokyo-1.anxhiljryhochnqc4beyspucqcuiuuizuxa6w7oyglmtuig4abvamknnpoxa"
     cooldown_duration: "20m"
   - name: "vps-node-us1"
     lan_url: "http://100.96.0.10:22578"
     supports_ip_change: true
-    ip_change_command: "bash /app/scripts/change_ip_vps3.sh"
+    ip_change_command: "/home/xyz/project/opencode2api/venv/bin/python /home/xyz/project/opencode2api/routeip/rotate_ip_multi.py --profile US --instance-id ocid1.instance.oc1.phx.anyhqljtopuuszyczmgvid4xbt6kr5x57t7t3msvuyvxdyhsz3r3msrpee3a"
     cooldown_duration: "20m"
-  - name: "vps-node-us1"
+  - name: "vps-node-us2"
     lan_url: "http://100.96.0.1:22578"
     supports_ip_change: true
-    ip_change_command: "bash /app/scripts/change_ip_vps3.sh"
+    ip_change_command: "/home/xyz/project/opencode2api/venv/bin/python /home/xyz/project/opencode2api/routeip/rotate_ip_multi.py --profile US --instance-id ocid1.instance.oc1.phx.anyhqljtopuuszycinsjw3evenbjvqhmiqtnyxceq6yx2hqvrfy5m6u2axmq"
     cooldown_duration: "20m"
