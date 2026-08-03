@@ -9,6 +9,7 @@ import (
 
 type Config struct {
 	Server struct {
+		Host    string   `yaml:"host"`
 		Port    int      `yaml:"port"`
 		APIKeys []string `yaml:"api_keys"`
 		Secret  string   `yaml:"secret"`
@@ -34,6 +35,7 @@ type NodeConfig struct {
 // ConfigYAML 用于 YAML 的反序列化辅助结构（支持解析字符串格式的时间，如 "30m"）
 type ConfigYAML struct {
 	Server struct {
+		Host    string   `yaml:"host"`
 		Port    int      `yaml:"port"`
 		APIKeys []string `yaml:"api_keys"`
 		Secret  string   `yaml:"secret"`
@@ -67,6 +69,10 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	cfg := &Config{}
+	cfg.Server.Host = raw.Server.Host
+	if cfg.Server.Host == "" {
+		cfg.Server.Host = "0.0.0.0"
+	}
 	cfg.Server.Port = raw.Server.Port
 	if cfg.Server.Port == 0 {
 		cfg.Server.Port = 8080

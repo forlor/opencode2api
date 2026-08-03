@@ -40,10 +40,10 @@ func main() {
 	// 初始化 HTTP 路由服务
 	router := server.NewRouter(cfg, pool)
 
-	addr := fmt.Sprintf(":%d", cfg.Server.Port)
-	log.Printf("OpenCode2API 服务已启动，监听地址: http://localhost%s", addr)
-	log.Printf("OpenAI 接口地址: http://localhost%s/v1/chat/completions", addr)
-	log.Printf("监控查看 API 地址: http://localhost%s/admin/nodes", addr)
+	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
+	log.Printf("OpenCode2API 服务已启动，监听地址: http://%s", addr)
+	log.Printf("OpenAI 接口地址: http://%s/v1/chat/completions", addr)
+	log.Printf("监控查看 API 地址: http://%s/admin/nodes", addr)
 
 	if err := http.ListenAndServe(addr, router); err != nil {
 		log.Fatalf("服务异常退出: %v", err)

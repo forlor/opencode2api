@@ -1,4 +1,5 @@
 server:
+  host: "0.0.0.0" # 绑定监听 IP，0.0.0.0 表示允许内网与外网访问
   port: 8080
   api_keys:
     - "sk-opencode-secret-key-1"
