@@ -2,7 +2,6 @@ package adapter
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -76,13 +75,13 @@ func ReadAndCheckStreamInitialError(resp *http.Response) ([]byte, bool, error) {
 		return append(peekBytes, fullBody...), true, nil
 	}
 
-	// 拼接 Reader 恢复 Body 句柄，正确还原 Peek 的字节
+	// reader (bufio.Reader) 内部已保留 Peek 过的缓存数据，直接使用 reader 即可，切勿使用 MultiReader 重复拼接
 	oldBody := resp.Body
 	resp.Body = struct {
 		io.Reader
 		io.Closer
 	}{
-		Reader: io.MultiReader(bytes.NewReader(peekBytes), reader),
+		Reader: reader,
 		Closer: oldBody,
 	}
 
