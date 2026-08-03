@@ -1,0 +1,41 @@
+server:
+  port: 8080
+  api_keys:
+    - "sk-opencode-secret-key-1"
+    - "sk-opencode-secret-key-2"
+  secret: "your-lan-proxy-secret-123456" # 局域网 Nginx 内部安全校验 Header (与 Nginx 中的 $http_x_proxy_secret 对应)
+
+default:
+  cooldown_duration: "30m" # 默认冷却时长，不可换 IP 节点触发 429 后进入冷却
+
+  # 明确的兜底模型配置：当客户端发来的模型名未在 model_mappings 匹配到时使用
+  fallback_model: "deepseek-v4-flash-free"
+
+  # 模型映射表 (支持多模型映射为 OpenCode 的目标模型)
+  model_mappings:
+    "gpt-4o": "deepseek-v4-flash-free"
+    "gpt-3.5-turbo": "deepseek-v4-flash-free"
+    "claude-3-5-sonnet": "deepseek-v4-flash-free"
+    "deepseek-chat": "deepseek-v4-flash-free"
+
+nodes:
+  # 节点 1：支持更换临时公网 IP，配置调用多账号通用 Python 换 IP 脚本 (账号 1: DEFAULT)
+  - name: "vps-node-phx-01"
+    lan_url: "http://192.168.1.101:8080" # VPS 1 局域网 Nginx 入口
+    supports_ip_change: true
+    # ip_change_command: 主服务收到 429 时后台执行的 Shell 命令
+    ip_change_command: "python3 /app/routeip/rotate_ip_multi.py --profile DEFAULT --instance-id ocid1.instance.oc1.phx.anyhqljtopuuszyczmgvid4xbt6kr5x57t7t3msvuyvxdyhsz3r3msrpee3a"
+    cooldown_duration: "30m"
+
+  # 节点 2：支持更换临时公网 IP，配置调用不同账号 Profile (账号 2: ACCOUNT_US_EAST)
+  - name: "vps-node-iad-02"
+    lan_url: "http://192.168.1.102:8080" # VPS 2 局域网 Nginx 入口
+    supports_ip_change: true
+    ip_change_command: "python3 /app/routeip/rotate_ip_multi.py --profile ACCOUNT_US_EAST --instance-id ocid1.instance.oc1.iad.abuwcljrq3xxxxxx"
+    cooldown_duration: "30m"
+
+  # 节点 3：固定 IP 节点 (不支持更换 IP，触发 429 后自动熔断冷却 30 分钟)
+  - name: "vps-node-static-03"
+    lan_url: "http://192.168.1.103:8080" # VPS 3 局域网 Nginx 入口
+    supports_ip_change: false
+    cooldown_duration: "30m"

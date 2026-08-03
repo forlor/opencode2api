@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  opencode2api:
+    build: .
+    container_name: opencode2api
+    restart: always
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./scripts:/app/scripts
+    environment:
+      - TZ=Asia/Shanghai

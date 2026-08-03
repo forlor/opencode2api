@@ -1,0 +1,49 @@
+server:
+  port: 22579
+  api_keys:
+    - "wPO1OndyzhOwV4OnKS17jsaF21es6H8JD1OsLs_F"
+  secret: "wPO1OndyzhOwV4OnKS17jsaF21es6H8JD1OsLs_F"
+
+default:
+  cooldown_duration: "30m"
+  fallback_model: "deepseek-v4-flash-free"
+  model_mappings:
+    "gpt-4o": "deepseek-v4-flash-free"
+
+nodes:
+  - name: "vps-node-sg-local"
+    lan_url: "http://127.0.0.1:22578" # VPS 1 局域网 Nginx 入口
+    supports_ip_change: false
+    cooldown_duration: "30m"
+  - name: "vps-node-sg-2"
+    lan_url: "http://100.96.0.3:22578" # VPS 1 局域网 Nginx 入口
+    supports_ip_change: true
+    ip_change_command: "bash /app/scripts/change_ip_vps3.sh"
+    cooldown_duration: "30m"
+  - name: "vps-node-cc1"
+    lan_url: "http://100.96.0.8:22578"
+    supports_ip_change: false
+    cooldown_duration: "30m"
+  - name: "vps-node-cc2"
+    lan_url: "http://100.96.0.9:22578"
+    supports_ip_change: false
+    cooldown_duration: "20m"
+  - name: "vps-node-jp1"
+    lan_url: "http://100.96.0.2:22578"
+    supports_ip_change: false
+    cooldown_duration: "20m"
+  - name: "vps-node-jp2"
+    lan_url: "http://100.96.0.6:22578"
+    supports_ip_change: true
+    ip_change_command: "bash /app/scripts/change_ip_vps3.sh"
+    cooldown_duration: "20m"
+  - name: "vps-node-us1"
+    lan_url: "http://100.96.0.10:22578"
+    supports_ip_change: true
+    ip_change_command: "bash /app/scripts/change_ip_vps3.sh"
+    cooldown_duration: "20m"
+  - name: "vps-node-us1"
+    lan_url: "http://100.96.0.1:22578"
+    supports_ip_change: true
+    ip_change_command: "bash /app/scripts/change_ip_vps3.sh"
+    cooldown_duration: "20m"

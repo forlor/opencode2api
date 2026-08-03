@@ -1,0 +1,23 @@
+curl -N 'https://opencode.ai/zen/v1/chat/completions' \
+  -H 'Connection: keep-alive' \
+  -H 'Authorization: Bearer public' \
+  -H 'Content-Type: application/json' \
+  -H 'User-Agent: opencode/local ai-sdk/provider-utils/4.0.23 runtime/node.js/24' \
+  -H 'X-Opencode-Client: desktop' \
+  -H 'X-Opencode-Project: global' \
+  -H 'X-Opencode-Request: msg_fc1a9650f0088RGf005698E025' \
+  -H 'X-Opencode-Session: ses_03e76837dffvcjAVh3xuQhI8QW' \
+  -H 'Accept: text/event-stream' \
+  -H 'Accept-Language: *' \
+  -H 'Accept-Encoding: br, gzip, deflate' \
+  -H 'Sec-Fetch-Mode: cors' \
+  --data-raw '{
+    "stream": true,
+    "model": "deepseek-v4-flash-free",
+    "messages": [
+      {
+        "role": "user",
+        "content": "讲解一下挂谷猜想"
+      }
+    ]
+  }'

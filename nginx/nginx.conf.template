@@ -1,0 +1,26 @@
+server {
+    # 绑定局域网/内网端口，只响应内网请求
+    listen 8080;
+    server_name _;
+
+    location / {
+        # 1. 验证来自 Go 主服务的 Secret 请求头
+        if ($http_x_proxy_secret != "YOUR_CONFIGURED_SECRET") {
+            return 403 "Forbidden";
+        }
+
+        # 2. 代理至 opencode.ai
+        proxy_pass https://opencode.ai/;
+        proxy_ssl_server_name on;
+        proxy_ssl_name opencode.ai;
+
+        # 3. 禁用缓冲区以支持 SSE 流式推流
+        proxy_buffering off;
+        proxy_cache off;
+
+        # 4. 仅保留目标 Host，严禁添加 X-Forwarded-For / X-Real-IP / Via 等泄露主服务 IP 的标头
+        proxy_set_header Host opencode.ai;
+        proxy_set_header Connection '';
+        proxy_http_version 1.1;
+    }
+}
