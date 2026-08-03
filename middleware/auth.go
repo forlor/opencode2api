@@ -11,6 +11,12 @@ import (
 func AuthMiddleware(cfg *config.Config) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// CORS 预检请求（OPTIONS）无需鉴权，直接放行
+			if r.Method == http.MethodOptions {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			// 如果没有设置 API Key，默认放行
 			if len(cfg.Server.APIKeys) == 0 {
 				next.ServeHTTP(w, r)

@@ -13,10 +13,40 @@ import (
 	"opencode2api/proxy"
 )
 
+// 共享 HTTP Transport，复用底层 TCP/TLS 连接池，避免每个请求重建连接
+var sharedTransport = &http.Transport{
+	MaxIdleConns:          100,
+	MaxIdleConnsPerHost:   20,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ResponseHeaderTimeout: 30 * time.Second,
+}
+
+// 非流式请求使用总超时，避免上游挂死拖住请求
+var nonStreamClient = &http.Client{
+	Transport: sharedTransport,
+	Timeout:   120 * time.Second,
+}
+
+// 流式(SSE)请求不设总超时，避免长生成被截断；
+// 依赖 ResponseHeaderTimeout 保证响应头及时返回，避免无响应挂死
+var streamClient = &http.Client{Transport: sharedTransport}
+
+// 非流式响应的 Copy 缓冲（默认 io.Copy 仅 32KB，增大以提升大响应吞吐）
+var copyBuf = make([]byte, 256*1024)
+
+// setCORS 为跨域请求添加 CORS 响应头
+func setCORS(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+}
+
 type Router struct {
-	cfg  *config.Config
-	pool *proxy.Pool
-	mux  *http.ServeMux
+	cfg         *config.Config
+	pool        *proxy.Pool
+	mux         *http.ServeMux
+	modelsCache []byte // 模型列表响应缓存（配置加载后不变）
 }
 
 func NewRouter(cfg *config.Config, pool *proxy.Pool) *Router {
@@ -26,6 +56,7 @@ func NewRouter(cfg *config.Config, pool *proxy.Pool) *Router {
 		mux:  http.NewServeMux(),
 	}
 
+	r.buildModelsCache()
 	r.setupRoutes()
 	return r
 }
@@ -46,6 +77,11 @@ func (r *Router) setupRoutes() {
 }
 
 func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request) {
+	setCORS(w)
+	if req.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if req.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -60,11 +96,16 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		return
 	}
 
-	var openAIReq adapter.OpenAIRequest
-	if err := json.Unmarshal(bodyBytes, &openAIReq); err != nil {
+	// 只解析一次为通用 map，保留客户端所有参数
+	payload, err := adapter.ParseOpenAIRequest(bodyBytes)
+	if err != nil {
 		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 		return
 	}
+
+	// 提取 stream / model 字段用于分流与模型映射
+	isStream, _ := payload["stream"].(bool)
+	clientModel, _ := payload["model"].(string)
 
 	// 最多重试节点的总数量次数
 	maxRetries := len(r.cfg.Nodes)
@@ -73,16 +114,14 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		return
 	}
 
-	// 非流式请求使用超时客户端；流式(SSE)请求不设总超时，避免长生成被 120s 截断
-	client := &http.Client{Timeout: 120 * time.Second}
-	var streamClient *http.Client
-	if openAIReq.Stream {
-		streamClient = &http.Client{} // 无超时，仅用于 SSE 长连接
-	}
-
 	// 根据客户端请求的模型，查询实际映射的目标模型
-	targetModel := r.cfg.GetMappedModel(openAIReq.Model)
-	log.Printf("收到请求 model: %s -> 映射为 targetModel: %s", openAIReq.Model, targetModel)
+	targetModel := r.cfg.GetMappedModel(clientModel)
+	log.Printf("收到请求 model: %s -> 映射为 targetModel: %s", clientModel, targetModel)
+
+	httpClient := nonStreamClient
+	if isStream {
+		httpClient = streamClient
+	}
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		// 1. 获取一个 Active 节点
@@ -94,7 +133,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		}
 
 		// 2. 构建转发请求
-		httpReq, err := adapter.BuildOpenCodeHTTPRequest(node, bodyBytes, targetModel, r.cfg.Server.Secret)
+		httpReq, err := adapter.BuildOpenCodeHTTPRequest(node, payload, targetModel, r.cfg.Server.Secret)
 		if err != nil {
 			log.Printf("[%s] 构建请求失败: %v", node.Name, err)
 			r.pool.Report4xx(node)
@@ -107,16 +146,16 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 
 		for retry := 0; retry < 3; retry++ {
 			if retry > 0 {
+				// 上一次请求可能连接失败导致 resp 为 nil，需判空再读取状态码
+				lastStatus := 0
+				if resp != nil {
+					lastStatus = resp.StatusCode
+				}
 				backoff := time.Duration(1<<(retry-1)) * time.Second
-				log.Printf("[%s] 遇到服务端临时异常(%d)，进行第 %d 次指数退避重试，等待 %v...", node.Name, resp.StatusCode, retry, backoff)
+				log.Printf("[%s] 遇到服务端临时异常(%d)，进行第 %d 次指数退避重试，等待 %v...", node.Name, lastStatus, retry, backoff)
 				time.Sleep(backoff)
 				// 重新构建请求 Header
-				httpReq, _ = adapter.BuildOpenCodeHTTPRequest(node, bodyBytes, targetModel, r.cfg.Server.Secret)
-			}
-
-			httpClient := client
-			if openAIReq.Stream {
-				httpClient = streamClient
+				httpReq, _ = adapter.BuildOpenCodeHTTPRequest(node, payload, targetModel, r.cfg.Server.Secret)
 			}
 
 			resp, respErr = httpClient.Do(httpReq)
@@ -160,7 +199,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		r.pool.Report200(node)
 
 		// 5. 区分 Stream 与非 Stream 响应
-		if openAIReq.Stream {
+		if isStream {
 			defer resp.Body.Close()
 			if err := adapter.HandleStreamForwarding(w, resp); err != nil {
 				log.Printf("[%s] SSE 推流异常: %v", node.Name, err)
@@ -174,7 +213,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		if len(errBody) > 0 {
 			w.Write(errBody)
 		} else {
-			io.Copy(w, resp.Body)
+			io.CopyBuffer(w, resp.Body, copyBuf)
 		}
 		return
 	}
@@ -183,6 +222,22 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 }
 
 func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
+	setCORS(w)
+	if req.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if req.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(r.modelsCache)
+}
+
+// buildModelsCache 根据配置预构建模型列表响应（配置加载后固定，无需每次请求重建）
+func (r *Router) buildModelsCache() {
 	modelSet := make(map[string]bool)
 
 	// 加入映射列表里的所有模型
@@ -195,11 +250,12 @@ func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
 	}
 
 	modelList := make([]map[string]interface{}, 0, len(modelSet))
+	created := time.Now().Unix()
 	for modelName := range modelSet {
 		modelList = append(modelList, map[string]interface{}{
 			"id":       modelName,
 			"object":   "model",
-			"created":  time.Now().Unix(),
+			"created":  created,
 			"owned_by": "opencode",
 		})
 	}
@@ -209,8 +265,7 @@ func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
 		"data":   modelList,
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	r.modelsCache, _ = json.Marshal(resp)
 }
 
 func (r *Router) handleAdminNodes(w http.ResponseWriter, req *http.Request) {

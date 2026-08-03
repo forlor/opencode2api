@@ -12,18 +12,6 @@ import (
 	"opencode2api/proxy"
 )
 
-// OpenAI Chat Completion 请求结构
-type OpenAIRequest struct {
-	Model    string          `json:"model"`
-	Messages []OpenAIMessage `json:"messages"`
-	Stream   bool            `json:"stream"`
-}
-
-type OpenAIMessage struct {
-	Role    string      `json:"role"`
-	Content interface{} `json:"content"`
-}
-
 // OpenCode 错误响应结构
 type OpenCodeErrorResponse struct {
 	Type  string `json:"type"`
@@ -33,12 +21,23 @@ type OpenCodeErrorResponse struct {
 	} `json:"error"`
 }
 
-// BuildOpenCodeHTTPRequest 将 OpenAI 请求转化为符合 OpenCode 规范的 http.Request
-// 通过 map 保留客户端原始请求中的所有参数（temperature/max_tokens 等），仅替换 model 字段
-func BuildOpenCodeHTTPRequest(node *proxy.Node, rawBody []byte, mappedModel, secret string) (*http.Request, error) {
+// ParseOpenAIRequest 解析客户端原始请求体为通用 map，保留所有参数（temperature/max_tokens 等）
+func ParseOpenAIRequest(rawBody []byte) (map[string]interface{}, error) {
 	var payload map[string]interface{}
 	if err := json.Unmarshal(rawBody, &payload); err != nil {
 		return nil, err
+	}
+	if payload == nil {
+		payload = make(map[string]interface{})
+	}
+	return payload, nil
+}
+
+// BuildOpenCodeHTTPRequest 将 OpenAI 请求转化为符合 OpenCode 规范的 http.Request
+// 接收已解析的 payload map，仅替换 model 字段，其余参数原样透传
+func BuildOpenCodeHTTPRequest(node *proxy.Node, payload map[string]interface{}, mappedModel, secret string) (*http.Request, error) {
+	if payload == nil {
+		payload = make(map[string]interface{})
 	}
 	// 替换为目标模型，保留其余字段原样透传
 	payload["model"] = mappedModel

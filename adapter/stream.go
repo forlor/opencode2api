@@ -64,8 +64,9 @@ func ReadAndCheckStreamInitialError(resp *http.Response) ([]byte, bool, error) {
 	}
 
 	// 状态码是 200 时，仍有可能是包裹在 SSE 数据中的错误 JSON
-	reader := bufio.NewReader(resp.Body)
-	peekBytes, err := reader.Peek(512)
+	// 使用较大的 Peek 窗口，避免长错误消息（message 较长时）漏检
+	reader := bufio.NewReaderSize(resp.Body, 64*1024)
+	peekBytes, err := reader.Peek(8 * 1024)
 	if err != nil && err != io.EOF {
 		return nil, false, err
 	}

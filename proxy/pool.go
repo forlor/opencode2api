@@ -3,7 +3,6 @@ package proxy
 import (
 	"errors"
 	"log"
-	"sync"
 	"sync/atomic"
 
 	"opencode2api/config"
@@ -11,7 +10,6 @@ import (
 
 type Pool struct {
 	nodes []*Node
-	mu    sync.RWMutex
 	index uint64
 }
 
@@ -31,10 +29,8 @@ func NewPool(cfg *config.Config) *Pool {
 var ErrNoAvailableNode = errors.New("所有 VPS 代理节点均处于 429 冷却或换 IP 状态，暂无可用节点")
 
 // GetNextNode 顺序轮询获取当前处于 Active 状态的节点
+// 节点池在启动后固定不变，无需加锁；index 使用原子递增保证并发下均匀轮询
 func (p *Pool) GetNextNode() (*Node, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
 	total := len(p.nodes)
 	if total == 0 {
 		return nil, errors.New("节点池配置为空")
@@ -55,9 +51,6 @@ func (p *Pool) GetNextNode() (*Node, error) {
 
 // Snapshots 获取所有节点的当前状态快照用于 API 统计展示
 func (p *Pool) Snapshots() []NodeSnapshot {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
 	snaps := make([]NodeSnapshot, 0, len(p.nodes))
 	for _, n := range p.nodes {
 		snaps = append(snaps, n.Snapshot())
