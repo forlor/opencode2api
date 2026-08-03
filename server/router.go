@@ -39,6 +39,8 @@ func (r *Router) setupRoutes() {
 
 	// API 路由
 	r.mux.Handle("/v1/chat/completions", authMW(http.HandlerFunc(r.handleChatCompletions)))
+	r.mux.Handle("/v1/messages", authMW(http.HandlerFunc(r.handleChatCompletions)))
+	r.mux.Handle("/v1/responses", authMW(http.HandlerFunc(r.handleChatCompletions)))
 	r.mux.Handle("/v1/models", authMW(http.HandlerFunc(r.handleModels)))
 
 	// 监控 API
@@ -89,7 +91,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		httpReq, err := adapter.BuildOpenCodeHTTPRequest(node, &openAIReq, targetModel, r.cfg.Server.Secret)
 		if err != nil {
 			log.Printf("[%s] 构建请求失败: %v", node.Name, err)
-			r.pool.ReportFailure(node)
+			r.pool.Report4xx(node)
 			continue
 		}
 
@@ -108,6 +110,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 
 			resp, respErr = client.Do(httpReq)
 			if respErr != nil {
+				r.pool.Report5xx(node)
 				continue
 			}
 
@@ -115,12 +118,13 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 			if !adapter.IsTemporaryServerError(resp.StatusCode) {
 				break
 			}
+			r.pool.Report5xx(node)
 			resp.Body.Close()
 		}
 
 		if respErr != nil || resp == nil {
 			log.Printf("[%s] 请求局域网 Nginx 失败: %v", node.Name, respErr)
-			r.pool.ReportFailure(node)
+			r.pool.Report5xx(node)
 			continue
 		}
 
@@ -133,8 +137,8 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 			continue // 自动无感重试下一个节点
 		}
 
-		// 请求成功
-		r.pool.ReportSuccess(node)
+		// 请求成功 (200 OK)
+		r.pool.Report200(node)
 
 		// 5. 区分 Stream 与非 Stream 响应
 		if openAIReq.Stream {

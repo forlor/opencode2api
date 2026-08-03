@@ -65,16 +65,20 @@ func (p *Pool) Snapshots() []NodeSnapshot {
 	return snaps
 }
 
-func (p *Pool) ReportSuccess(node *Node) {
-	atomic.AddUint64(&node.SuccessRequests, 1)
+func (p *Pool) Report200(node *Node) {
+	atomic.AddUint64(&node.Status200Count, 1)
 }
 
-func (p *Pool) ReportFailure(node *Node) {
-	atomic.AddUint64(&node.FailedRequests, 1)
+func (p *Pool) Report4xx(node *Node) {
+	atomic.AddUint64(&node.Status4xxCount, 1)
+}
+
+func (p *Pool) Report5xx(node *Node) {
+	atomic.AddUint64(&node.Status5xxCount, 1)
 }
 
 func (p *Pool) ReportRateLimit(node *Node) {
-	atomic.AddUint64(&node.FailedRequests, 1)
+	atomic.AddUint64(&node.Status4xxCount, 1)
 	log.Printf("[%s] 节点触发 RateLimit/FreeUsageLimitError，开始进行容错与状态转换", node.Name)
 	node.HandleRateLimit()
 }

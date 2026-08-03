@@ -56,10 +56,11 @@ type Node struct {
 	coolingUntil time.Time // 冷却截止时间
 
 	// 统计指标
-	TotalRequests   uint64
-	SuccessRequests uint64
-	FailedRequests  uint64
-	IPChangeCount   uint64
+	TotalRequests uint64
+	Status200Count uint64
+	Status4xxCount uint64
+	Status5xxCount uint64
+	IPChangeCount  uint64
 
 	secret string // 局域网请求秘钥
 }
@@ -200,17 +201,18 @@ func (n *Node) healthCheck() bool {
 }
 
 type NodeSnapshot struct {
-	Name             string     `json:"name"`
-	LANURL           string     `json:"lan_url"`
-	Status           string     `json:"status"`
-	SessionID        string     `json:"session_id"`
-	NextSessionRotate string    `json:"next_session_rotate"`
-	SupportsIPChange bool       `json:"supports_ip_change"`
-	CoolingUntil     *time.Time `json:"cooling_until,omitempty"`
-	TotalRequests    uint64     `json:"total_requests"`
-	SuccessRequests  uint64     `json:"success_requests"`
-	FailedRequests   uint64     `json:"failed_requests"`
-	IPChangeCount    uint64     `json:"ip_change_count"`
+	Name              string     `json:"name"`
+	LANURL            string     `json:"lan_url"`
+	Status            string     `json:"status"`
+	SessionID         string     `json:"session_id"`
+	NextSessionRotate string     `json:"next_session_rotate"`
+	SupportsIPChange  bool       `json:"supports_ip_change"`
+	CoolingUntil      *time.Time `json:"cooling_until,omitempty"`
+	TotalRequests     uint64     `json:"total_requests"`
+	Status200Count    uint64     `json:"status_200_count"`
+	Status4xxCount    uint64     `json:"status_4xx_count"`
+	Status5xxCount    uint64     `json:"status_5xx_count"`
+	IPChangeCount     uint64     `json:"ip_change_count"`
 }
 
 func (n *Node) Snapshot() NodeSnapshot {
@@ -227,8 +229,9 @@ func (n *Node) Snapshot() NodeSnapshot {
 		NextSessionRotate: nextRotate,
 		SupportsIPChange:  n.SupportsIPChange,
 		TotalRequests:     atomic.LoadUint64(&n.TotalRequests),
-		SuccessRequests:   atomic.LoadUint64(&n.SuccessRequests),
-		FailedRequests:    atomic.LoadUint64(&n.FailedRequests),
+		Status200Count:    atomic.LoadUint64(&n.Status200Count),
+		Status4xxCount:    atomic.LoadUint64(&n.Status4xxCount),
+		Status5xxCount:    atomic.LoadUint64(&n.Status5xxCount),
 		IPChangeCount:     atomic.LoadUint64(&n.IPChangeCount),
 	}
 
