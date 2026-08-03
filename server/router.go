@@ -39,8 +39,6 @@ func (r *Router) setupRoutes() {
 
 	// API 路由
 	r.mux.Handle("/v1/chat/completions", authMW(http.HandlerFunc(r.handleChatCompletions)))
-	r.mux.Handle("/v1/messages", authMW(http.HandlerFunc(r.handleChatCompletions)))
-	r.mux.Handle("/v1/responses", authMW(http.HandlerFunc(r.handleChatCompletions)))
 	r.mux.Handle("/v1/models", authMW(http.HandlerFunc(r.handleModels)))
 
 	// 监控 API
@@ -52,6 +50,9 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	// 限制请求体大小，防止恶意超大 body 导致内存耗尽
+	req.Body = http.MaxBytesReader(w, req.Body, 10<<20) // 10MB
 
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
@@ -72,7 +73,12 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		return
 	}
 
+	// 非流式请求使用超时客户端；流式(SSE)请求不设总超时，避免长生成被 120s 截断
 	client := &http.Client{Timeout: 120 * time.Second}
+	var streamClient *http.Client
+	if openAIReq.Stream {
+		streamClient = &http.Client{} // 无超时，仅用于 SSE 长连接
+	}
 
 	// 根据客户端请求的模型，查询实际映射的目标模型
 	targetModel := r.cfg.GetMappedModel(openAIReq.Model)
@@ -88,7 +94,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		}
 
 		// 2. 构建转发请求
-		httpReq, err := adapter.BuildOpenCodeHTTPRequest(node, &openAIReq, targetModel, r.cfg.Server.Secret)
+		httpReq, err := adapter.BuildOpenCodeHTTPRequest(node, bodyBytes, targetModel, r.cfg.Server.Secret)
 		if err != nil {
 			log.Printf("[%s] 构建请求失败: %v", node.Name, err)
 			r.pool.Report4xx(node)
@@ -105,10 +111,15 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 				log.Printf("[%s] 遇到服务端临时异常(%d)，进行第 %d 次指数退避重试，等待 %v...", node.Name, resp.StatusCode, retry, backoff)
 				time.Sleep(backoff)
 				// 重新构建请求 Header
-				httpReq, _ = adapter.BuildOpenCodeHTTPRequest(node, &openAIReq, targetModel, r.cfg.Server.Secret)
+				httpReq, _ = adapter.BuildOpenCodeHTTPRequest(node, bodyBytes, targetModel, r.cfg.Server.Secret)
 			}
 
-			resp, respErr = client.Do(httpReq)
+			httpClient := client
+			if openAIReq.Stream {
+				httpClient = streamClient
+			}
+
+			resp, respErr = httpClient.Do(httpReq)
 			if respErr != nil {
 				r.pool.Report5xx(node)
 				continue
@@ -125,6 +136,14 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		if respErr != nil || resp == nil {
 			log.Printf("[%s] 请求局域网 Nginx 失败: %v", node.Name, respErr)
 			r.pool.Report5xx(node)
+			continue
+		}
+
+		// 内部指数退避重试耗尽后仍为 5xx，视为该节点服务端抖动，切换下一节点
+		if adapter.IsTemporaryServerError(resp.StatusCode) {
+			log.Printf("[%s] 重试 3 次后仍为服务端临时错误 %d，自动切换下一节点", node.Name, resp.StatusCode)
+			r.pool.Report5xx(node)
+			resp.Body.Close()
 			continue
 		}
 
@@ -180,7 +199,7 @@ func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
 		modelList = append(modelList, map[string]interface{}{
 			"id":       modelName,
 			"object":   "model",
-			"created":  1700000000,
+			"created":  time.Now().Unix(),
 			"owned_by": "opencode",
 		})
 	}

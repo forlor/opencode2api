@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
-	mathRand "math/rand"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"opencode2api/config"
@@ -14,9 +16,6 @@ import (
 )
 
 func main() {
-	// 初始化随机种子
-	mathRand.Seed(time.Now().UnixNano())
-
 	configPath := "config.yaml"
 	if len(os.Args) > 1 {
 		configPath = os.Args[1]
@@ -45,7 +44,32 @@ func main() {
 	log.Printf("OpenAI 接口地址: http://%s/v1/chat/completions", addr)
 	log.Printf("监控查看 API 地址: http://%s/admin/nodes", addr)
 
-	if err := http.ListenAndServe(addr, router); err != nil {
-		log.Fatalf("服务异常退出: %v", err)
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
+
+	// 优雅退出：监听 SIGINT/SIGTERM，等待在途请求处理完成
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("服务异常退出: %v", err)
+		}
+	}()
+	log.Println("服务已启动，等待退出信号...")
+
+	<-ctx.Done()
+	log.Println("收到退出信号，正在优雅关闭...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("优雅关闭失败: %v", err)
+	}
+	log.Println("服务已退出")
 }

@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"strings"
 
@@ -31,7 +32,7 @@ func AuthMiddleware(cfg *config.Config) func(http.Handler) http.Handler {
 			token := strings.TrimSpace(parts[1])
 			valid := false
 			for _, key := range cfg.Server.APIKeys {
-				if key == token {
+				if subtle.ConstantTimeCompare([]byte(key), []byte(token)) == 1 {
 					valid = true
 					break
 				}

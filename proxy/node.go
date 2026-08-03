@@ -53,7 +53,8 @@ type Node struct {
 	sessionMu         sync.RWMutex
 	nextSessionRotate time.Time
 
-	coolingUntil time.Time // 冷却截止时间
+	mu           sync.Mutex // 保护 coolingUntil
+	coolingUntil time.Time  // 冷却截止时间
 
 	// 统计指标
 	TotalRequests uint64
@@ -77,6 +78,7 @@ func NewNode(cfg config.NodeConfig, secret string) *Node {
 	atomic.StoreInt32(&n.status, int32(StatusActive))
 	n.RotateSession()
 	n.scheduleSessionRotate()
+	n.scheduleDownRecovery()
 	return n
 }
 
@@ -123,6 +125,27 @@ func (n *Node) scheduleSessionRotate() {
 	}()
 }
 
+// scheduleDownRecovery 周期性对 Down 节点做健康检查，恢复后自动转回 Active 状态
+func (n *Node) scheduleDownRecovery() {
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if n.Status() != StatusDown {
+				continue
+			}
+			if n.healthCheck() {
+				if atomic.CompareAndSwapInt32(&n.status, int32(StatusDown), int32(StatusActive)) {
+					n.RotateSession()
+					log.Printf("[%s] 健康检查通过，节点从 Down 状态自动恢复为 Active", n.Name)
+				}
+			} else {
+				log.Printf("[%s] 健康检查未通过，节点保持 Down 状态，下次重试", n.Name)
+			}
+		}
+	}()
+}
+
 // HandleRateLimit 触发限流处理逻辑 (带 CAS 并发锁控制)
 func (n *Node) HandleRateLimit() {
 	// 如果是可换 IP 节点
@@ -138,8 +161,11 @@ func (n *Node) HandleRateLimit() {
 
 	// 如果是不支持换 IP 的节点
 	if atomic.CompareAndSwapInt32(&n.status, int32(StatusActive), int32(StatusCooling)) {
+		n.mu.Lock()
 		n.coolingUntil = time.Now().Add(n.CooldownDuration)
-		log.Printf("[%s] 节点进入冷却状态，时长: %v，截止时间: %s", n.Name, n.CooldownDuration, n.coolingUntil.Format("15:04:05"))
+		coolUntil := n.coolingUntil
+		n.mu.Unlock()
+		log.Printf("[%s] 节点进入冷却状态，时长: %v，截止时间: %s", n.Name, n.CooldownDuration, coolUntil.Format("15:04:05"))
 
 		go func() {
 			time.Sleep(n.CooldownDuration)
@@ -236,7 +262,9 @@ func (n *Node) Snapshot() NodeSnapshot {
 	}
 
 	if n.Status() == StatusCooling {
+		n.mu.Lock()
 		t := n.coolingUntil
+		n.mu.Unlock()
 		snap.CoolingUntil = &t
 	}
 
