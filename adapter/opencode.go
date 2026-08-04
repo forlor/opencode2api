@@ -67,7 +67,7 @@ func BuildOpenCodeHTTPRequest(node *proxy.Node, payload map[string]interface{}, 
 	req.Header.Set("X-Opencode-Session", node.GetSessionID()) // 使用节点绑定的 Session
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Accept-Language", "*")
-	req.Header.Set("Accept-Encoding", "br, gzip, deflate")
+	// 不设置 Accept-Encoding，交由 Go http.Client 自动处理 gzip 解压 (Go 不自动解压 br)
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 
 	// 局域网 Nginx 内部安全密钥 Header

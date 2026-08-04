@@ -163,7 +163,11 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 					lastStatus = resp.StatusCode
 				}
 				backoff := time.Duration(1<<(retry-1)) * time.Second
-				log.Printf("[%s] 遇到服务端临时异常(%d)，进行第 %d 次指数退避重试，等待 %v...", node.Name, lastStatus, retry, backoff)
+				if lastStatus == 0 {
+					log.Printf("[%s] 上一次请求连接失败，无 HTTP 响应，进行第 %d 次指数退避重试，等待 %v...", node.Name, retry, backoff)
+				} else {
+					log.Printf("[%s] 遇到服务端临时异常(%d)，进行第 %d 次指数退避重试，等待 %v...", node.Name, lastStatus, retry, backoff)
+				}
 				time.Sleep(backoff)
 				// 重新构建请求 Header
 				httpReq, _ = adapter.BuildOpenCodeHTTPRequest(node, payload, apiPath, targetModel, r.cfg.Server.Secret)
@@ -171,6 +175,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 
 			resp, respErr = httpClient.Do(httpReq)
 			if respErr != nil {
+				log.Printf("[%s] 第 %d 次请求局域网 Nginx 连接失败: %v (URL: %s)", node.Name, retry+1, respErr, httpReq.URL.String())
 				r.pool.Report5xx(node)
 				continue
 			}
@@ -186,7 +191,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		}
 
 		if respErr != nil || resp == nil {
-			log.Printf("[%s] 请求局域网 Nginx 失败: %v", node.Name, respErr)
+			log.Printf("[%s] 请求局域网 Nginx 失败(3 次重试后): %v (URL: %s)", node.Name, respErr, httpReq.URL.String())
 			r.pool.Report5xx(node)
 			continue
 		}
