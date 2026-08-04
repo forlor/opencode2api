@@ -75,6 +75,8 @@ func (r *Router) setupRoutes() {
 
 	// API 路由
 	r.mux.Handle("/v1/chat/completions", authMW(http.HandlerFunc(r.handleChatCompletions)))
+	r.mux.Handle("/v1/messages", authMW(http.HandlerFunc(r.handleChatCompletions)))
+	r.mux.Handle("/v1/responses", authMW(http.HandlerFunc(r.handleChatCompletions)))
 	r.mux.Handle("/v1/models", authMW(http.HandlerFunc(r.handleModels)))
 
 	// 监控 API
