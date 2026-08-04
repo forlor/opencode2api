@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"opencode2api/adapter"
@@ -16,7 +17,7 @@ import (
 // 共享 HTTP Transport，复用底层 TCP/TLS 连接池，避免每个请求重建连接
 var sharedTransport = &http.Transport{
 	MaxIdleConns:          100,
-	MaxIdleConnsPerHost:   20,
+	MaxIdleConnsPerHost:   50,
 	IdleConnTimeout:       90 * time.Second,
 	TLSHandshakeTimeout:   10 * time.Second,
 	ResponseHeaderTimeout: 30 * time.Second,
@@ -32,8 +33,12 @@ var nonStreamClient = &http.Client{
 // 依赖 ResponseHeaderTimeout 保证响应头及时返回，避免无响应挂死
 var streamClient = &http.Client{Transport: sharedTransport}
 
-// 非流式响应的 Copy 缓冲（默认 io.Copy 仅 32KB，增大以提升大响应吞吐）
-var copyBuf = make([]byte, 256*1024)
+// 非流式响应的 Copy 缓冲池（io.CopyBuffer 的 buf 不能并发复用，需每请求独立分配）
+var copyBufPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 256*1024)
+	},
+}
 
 // setCORS 为跨域请求添加 CORS 响应头
 func setCORS(w http.ResponseWriter) {
@@ -195,6 +200,22 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 			continue // 自动无感重试下一个节点
 		}
 
+		// 非 200 响应（如 400/404/422）为确定性业务错误，透传状态码与错误体，不计为成功
+		if resp.StatusCode != http.StatusOK {
+			defer resp.Body.Close()
+			r.pool.Report4xx(node)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(resp.StatusCode)
+			if len(errBody) > 0 {
+				w.Write(errBody)
+			} else {
+				buf := copyBufPool.Get().([]byte)
+				io.CopyBuffer(w, resp.Body, buf)
+				copyBufPool.Put(buf)
+			}
+			return
+		}
+
 		// 请求成功 (200 OK)
 		r.pool.Report200(node)
 
@@ -213,7 +234,9 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		if len(errBody) > 0 {
 			w.Write(errBody)
 		} else {
-			io.CopyBuffer(w, resp.Body, copyBuf)
+			buf := copyBufPool.Get().([]byte)
+			io.CopyBuffer(w, resp.Body, buf)
+			copyBufPool.Put(buf)
 		}
 		return
 	}

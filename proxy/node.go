@@ -16,6 +16,9 @@ import (
 	"opencode2api/config"
 )
 
+// 健康检查共享 HTTP 客户端（低频调用，复用连接池即可）
+var healthCheckClient = &http.Client{Timeout: 10 * time.Second}
+
 type NodeStatus int32
 
 const (
@@ -209,14 +212,13 @@ func (n *Node) processIPChange() {
 }
 
 func (n *Node) healthCheck() bool {
-	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest("GET", n.LANURL+"/", nil)
 	if err != nil {
 		return false
 	}
 	req.Header.Set("X-Proxy-Secret", n.secret)
 
-	resp, err := client.Do(req)
+	resp, err := healthCheckClient.Do(req)
 	if err != nil {
 		return false
 	}

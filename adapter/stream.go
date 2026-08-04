@@ -22,10 +22,17 @@ func HandleStreamForwarding(w http.ResponseWriter, resp *http.Response) error {
 	reader := bufio.NewReader(resp.Body)
 
 	for {
-		line, err := reader.ReadBytes('\n')
+		line, err := reader.ReadSlice('\n')
+		// ErrBufferFull 表示单行超过内部缓冲，改用 ReadBytes 读完整行
+		if err == bufio.ErrBufferFull {
+			line = append(append([]byte(nil), line...), readRemaining(reader)...)
+			err = nil
+		}
 		if len(line) > 0 {
-			// 直接写给客户端并立即刷盘
-			w.Write(line)
+			// 直接写给客户端并立即刷盘；若客户端已断开，停止转发避免 goroutine 泄漏
+			if _, werr := w.Write(line); werr != nil {
+				return werr
+			}
 			flusher.Flush()
 		}
 
@@ -38,6 +45,21 @@ func HandleStreamForwarding(w http.ResponseWriter, resp *http.Response) error {
 	}
 
 	return nil
+}
+
+// readRemaining 读取到换行为止的剩余内容（配合 ReadSlice 的 ErrBufferFull 使用）
+func readRemaining(reader *bufio.Reader) []byte {
+	var tail []byte
+	for {
+		part, err := reader.ReadSlice('\n')
+		tail = append(tail, part...)
+		if err == nil || err == io.EOF {
+			return tail
+		}
+		if err != bufio.ErrBufferFull {
+			return tail
+		}
+	}
 }
 
 // IsTemporaryServerError 判断是否为 503/502/500 等 OpenCode 服务端临时抖动错误

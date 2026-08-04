@@ -2,11 +2,10 @@ package adapter
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"opencode2api/proxy"
@@ -78,12 +77,13 @@ func BuildOpenCodeHTTPRequest(node *proxy.Node, payload map[string]interface{}, 
 	return req, nil
 }
 
+// 请求 ID 生成：时间戳 + 原子计数器组合，避免每次请求的 crypto/rand 系统调用开销
+var reqIDCounter uint64
+
 func generateRequestID() string {
-	bytes := make([]byte, 13)
-	if _, err := rand.Read(bytes); err != nil {
-		return fmt.Sprintf("msg_%d", time.Now().UnixNano())
-	}
-	return "msg_" + hex.EncodeToString(bytes)
+	ts := time.Now().UnixNano()
+	seq := atomic.AddUint64(&reqIDCounter, 1)
+	return fmt.Sprintf("msg_%x_%x", ts, seq)
 }
 
 // CheckIsFreeUsageLimitError 检查 Body 或 JSON 结构中是否包含 FreeUsageLimitError 报错
