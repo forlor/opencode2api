@@ -94,6 +94,9 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		return
 	}
 
+	// 转发到节点时保持与入口相同的路径，使 Anthropic(messages)/OpenAI(chat) 协议原样透传
+	apiPath := req.URL.Path
+
 	// 限制请求体大小，防止恶意超大 body 导致内存耗尽
 	req.Body = http.MaxBytesReader(w, req.Body, 10<<20) // 10MB
 
@@ -140,7 +143,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		}
 
 		// 2. 构建转发请求
-		httpReq, err := adapter.BuildOpenCodeHTTPRequest(node, payload, targetModel, r.cfg.Server.Secret)
+		httpReq, err := adapter.BuildOpenCodeHTTPRequest(node, payload, apiPath, targetModel, r.cfg.Server.Secret)
 		if err != nil {
 			log.Printf("[%s] 构建请求失败: %v", node.Name, err)
 			r.pool.Report4xx(node)
@@ -162,7 +165,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 				log.Printf("[%s] 遇到服务端临时异常(%d)，进行第 %d 次指数退避重试，等待 %v...", node.Name, lastStatus, retry, backoff)
 				time.Sleep(backoff)
 				// 重新构建请求 Header
-				httpReq, _ = adapter.BuildOpenCodeHTTPRequest(node, payload, targetModel, r.cfg.Server.Secret)
+				httpReq, _ = adapter.BuildOpenCodeHTTPRequest(node, payload, apiPath, targetModel, r.cfg.Server.Secret)
 			}
 
 			resp, respErr = httpClient.Do(httpReq)
