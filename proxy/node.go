@@ -106,9 +106,10 @@ func (n *Node) RotateSession() {
 		n.sessionID = "ses_" + hex.EncodeToString(bytes)
 	}
 
-	// 随机 121 ~ 240 分钟 (约 2 ~ 4 小时)
+	// 随机 121 ~ 240 分钟 (约 2 ~ 4 小时)，秒数也随机
 	minutes := 121 + mathRand.Intn(120) // 121 + [0, 119] = [121, 240]
-	n.nextSessionRotate = time.Now().Add(time.Duration(minutes) * time.Minute)
+	seconds := mathRand.Intn(60)        // [0, 59]
+	n.nextSessionRotate = time.Now().Add(time.Duration(minutes)*time.Minute + time.Duration(seconds)*time.Second)
 	log.Printf("[%s] Session 自动刷新为: %s (下一次刷新时间: %s)", n.Name, n.sessionID, n.nextSessionRotate.Format("15:04:05"))
 }
 
