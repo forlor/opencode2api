@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -179,7 +180,9 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 				break
 			}
 			r.pool.Report5xx(node)
+			bodyBytes, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			log.Printf("[%s] 服务端临时异常响应详情 (第 %d 次): %s", node.Name, retry+1, truncateLog(bodyBytes))
 		}
 
 		if respErr != nil || resp == nil {
@@ -190,9 +193,10 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 
 		// 内部指数退避重试耗尽后仍为 5xx，视为该节点服务端抖动，切换下一节点
 		if adapter.IsTemporaryServerError(resp.StatusCode) {
-			log.Printf("[%s] 重试 3 次后仍为服务端临时错误 %d，自动切换下一节点", node.Name, resp.StatusCode)
-			r.pool.Report5xx(node)
+			bodyBytes, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			log.Printf("[%s] 重试 3 次后仍为服务端临时错误 %d，自动切换下一节点，详情: %s", node.Name, resp.StatusCode, truncateLog(bodyBytes))
+			r.pool.Report5xx(node)
 			continue
 		}
 
@@ -303,4 +307,13 @@ func (r *Router) handleAdminNodes(w http.ResponseWriter, req *http.Request) {
 		"total_nodes": len(snaps),
 		"nodes":       snaps,
 	})
+}
+
+// truncateLog 截断响应体日志，避免长错误信息刷爆日志，最多保留 2000 字节
+func truncateLog(b []byte) string {
+	const maxLen = 2000
+	if len(b) > maxLen {
+		return string(b[:maxLen]) + fmt.Sprintf("... (truncated %d bytes)", len(b)-maxLen)
+	}
+	return string(b)
 }
