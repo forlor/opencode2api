@@ -60,14 +60,29 @@ func (p *Pool) Snapshots() []NodeSnapshot {
 
 func (p *Pool) Report200(node *Node) {
 	atomic.AddUint64(&node.Status200Count, 1)
+	// 请求成功，清零连续失败计数
+	atomic.StoreInt32(&node.consecutive5xx, 0)
 }
 
 func (p *Pool) Report4xx(node *Node) {
 	atomic.AddUint64(&node.Status4xxCount, 1)
 }
 
+// Report5xx 记录服务端 5xx 响应 (nginx 活着、能转发，只是上游抖动)，只计数不判定 Down
 func (p *Pool) Report5xx(node *Node) {
 	atomic.AddUint64(&node.Status5xxCount, 1)
+	atomic.StoreInt32(&node.consecutive5xx, 0)
+}
+
+// ReportConnectionFailure 记录网络层连接失败 (resp 为 nil，nginx 不可达)
+// 连续达到阈值才判定节点下线，交给健康检查自动恢复
+func (p *Pool) ReportConnectionFailure(node *Node) {
+	atomic.AddUint64(&node.Status5xxCount, 1)
+	if atomic.AddInt32(&node.consecutive5xx, 1) >= 3 {
+		if atomic.CompareAndSwapInt32(&node.status, int32(StatusActive), int32(StatusDown)) {
+			log.Printf("[%s] 连续连接失败达到 3 次，节点判定为 Down，进入健康检查恢复流程", node.Name)
+		}
+	}
 }
 
 func (p *Pool) ReportRateLimit(node *Node) {

@@ -55,6 +55,7 @@ type Node struct {
 	sessionID         string // 当前节点绑定的 SessionID
 	sessionMu         sync.RWMutex
 	nextSessionRotate time.Time
+	consecutive5xx    int32 // 连续失败次数（连接失败或 5xx），达到阈值置为 Down
 
 	mu           sync.Mutex // 保护 coolingUntil
 	coolingUntil time.Time  // 冷却截止时间
@@ -140,6 +141,7 @@ func (n *Node) scheduleDownRecovery() {
 			}
 			if n.healthCheck() {
 				if atomic.CompareAndSwapInt32(&n.status, int32(StatusDown), int32(StatusActive)) {
+					atomic.StoreInt32(&n.consecutive5xx, 0)
 					n.RotateSession()
 					log.Printf("[%s] 健康检查通过，节点从 Down 状态自动恢复为 Active", n.Name)
 				}
@@ -173,6 +175,7 @@ func (n *Node) HandleRateLimit() {
 
 		go func() {
 			time.Sleep(n.CooldownDuration)
+			atomic.StoreInt32(&n.consecutive5xx, 0)
 			atomic.StoreInt32(&n.status, int32(StatusActive))
 			n.RotateSession()
 			log.Printf("[%s] 节点冷却完毕，自动恢复为 Active 状态", n.Name)
@@ -203,6 +206,7 @@ func (n *Node) processIPChange() {
 
 	// 3. 通过局域网发起健康检查测试
 	if n.healthCheck() {
+		atomic.StoreInt32(&n.consecutive5xx, 0)
 		n.RotateSession()
 		atomic.StoreInt32(&n.status, int32(StatusActive))
 		log.Printf("[%s] 健康检查通过，新公网 IP 连通正常，节点恢复 Active 状态", n.Name)

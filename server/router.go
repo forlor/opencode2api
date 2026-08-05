@@ -21,7 +21,7 @@ var sharedTransport = &http.Transport{
 	MaxIdleConnsPerHost:   50,
 	IdleConnTimeout:       90 * time.Second,
 	TLSHandshakeTimeout:   10 * time.Second,
-	ResponseHeaderTimeout: 30 * time.Second,
+	ResponseHeaderTimeout: 90 * time.Second,
 }
 
 // 非流式请求使用总超时，避免上游挂死拖住请求
@@ -176,7 +176,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 			resp, respErr = httpClient.Do(httpReq)
 			if respErr != nil {
 				log.Printf("[%s] 第 %d 次请求局域网 Nginx 连接失败: %v (URL: %s)", node.Name, retry+1, respErr, httpReq.URL.String())
-				r.pool.Report5xx(node)
+				r.pool.ReportConnectionFailure(node)
 				continue
 			}
 
@@ -192,7 +192,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 
 		if respErr != nil || resp == nil {
 			log.Printf("[%s] 请求局域网 Nginx 失败(3 次重试后): %v (URL: %s)", node.Name, respErr, httpReq.URL.String())
-			r.pool.Report5xx(node)
+			r.pool.ReportConnectionFailure(node)
 			continue
 		}
 
