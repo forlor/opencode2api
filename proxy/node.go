@@ -130,13 +130,20 @@ func (n *Node) scheduleSessionRotate() {
 	}()
 }
 
-// scheduleDownRecovery 周期性对 Down 节点做健康检查，恢复后自动转回 Active 状态
+// scheduleDownRecovery 对 Down 节点做健康检查，恢复后自动转回 Active 状态
+// 健康检查失败采用指数退避：60s -> 120s -> 240s -> 480s -> 600s(10分钟封顶)
 func (n *Node) scheduleDownRecovery() {
 	go func() {
-		ticker := time.NewTicker(60 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
+		const (
+			baseInterval = 60 * time.Second
+			maxInterval  = 10 * time.Minute
+		)
+		interval := baseInterval
+		for {
+			time.Sleep(interval)
 			if n.Status() != StatusDown {
+				// 节点已恢复或非 Down 状态，重置退避间隔
+				interval = baseInterval
 				continue
 			}
 			if n.healthCheck() {
@@ -145,8 +152,14 @@ func (n *Node) scheduleDownRecovery() {
 					n.RotateSession()
 					log.Printf("[%s] 健康检查通过，节点从 Down 状态自动恢复为 Active", n.Name)
 				}
+				interval = baseInterval
 			} else {
-				log.Printf("[%s] 健康检查未通过，节点保持 Down 状态，下次重试", n.Name)
+				// 失败则退避翻倍，封顶 10 分钟
+				interval *= 2
+				if interval > maxInterval {
+					interval = maxInterval
+				}
+				log.Printf("[%s] 健康检查未通过，节点保持 Down 状态，%v 后重试", n.Name, interval)
 			}
 		}
 	}()
