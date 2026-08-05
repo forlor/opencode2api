@@ -2,9 +2,11 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -175,8 +177,13 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 
 			resp, respErr = httpClient.Do(httpReq)
 			if respErr != nil {
-				log.Printf("[%s] 第 %d 次请求局域网 Nginx 连接失败: %v (URL: %s)", node.Name, retry+1, respErr, httpReq.URL.String())
-				r.pool.ReportConnectionFailure(node)
+				if isTimeoutError(respErr) {
+					log.Printf("[%s] 第 %d 次请求等待响应头超时 (nginx 存活、上游响应慢): %v", node.Name, retry+1, respErr)
+					r.pool.ReportTimeout(node)
+				} else {
+					log.Printf("[%s] 第 %d 次请求局域网 Nginx 连接失败: %v (URL: %s)", node.Name, retry+1, respErr, httpReq.URL.String())
+					r.pool.ReportConnectionFailure(node)
+				}
 				continue
 			}
 
@@ -191,8 +198,13 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		}
 
 		if respErr != nil || resp == nil {
-			log.Printf("[%s] 请求局域网 Nginx 失败(3 次重试后): %v (URL: %s)", node.Name, respErr, httpReq.URL.String())
-			r.pool.ReportConnectionFailure(node)
+			if isTimeoutError(respErr) {
+				log.Printf("[%s] 请求等待响应头超时(3 次重试后)，切换下一节点: %v", node.Name, respErr)
+				r.pool.ReportTimeout(node)
+			} else {
+				log.Printf("[%s] 请求局域网 Nginx 失败(3 次重试后): %v (URL: %s)", node.Name, respErr, httpReq.URL.String())
+				r.pool.ReportConnectionFailure(node)
+			}
 			continue
 		}
 
@@ -216,7 +228,6 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 
 		// 非 200 响应（如 400/404/422）为确定性业务错误，透传状态码与错误体，不计为成功
 		if resp.StatusCode != http.StatusOK {
-			defer resp.Body.Close()
 			r.pool.Report4xx(node)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(resp.StatusCode)
@@ -227,6 +238,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 				io.CopyBuffer(w, resp.Body, buf)
 				copyBufPool.Put(buf)
 			}
+			resp.Body.Close()
 			return
 		}
 
@@ -235,15 +247,14 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 
 		// 5. 区分 Stream 与非 Stream 响应
 		if isStream {
-			defer resp.Body.Close()
 			if err := adapter.HandleStreamForwarding(w, resp); err != nil {
 				log.Printf("[%s] SSE 推流异常: %v", node.Name, err)
 			}
+			resp.Body.Close()
 			return
 		}
 
 		// 非 Stream 响应直接返回
-		defer resp.Body.Close()
 		w.Header().Set("Content-Type", "application/json")
 		if len(errBody) > 0 {
 			w.Write(errBody)
@@ -252,6 +263,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 			io.CopyBuffer(w, resp.Body, buf)
 			copyBufPool.Put(buf)
 		}
+		resp.Body.Close()
 		return
 	}
 
@@ -321,4 +333,10 @@ func truncateLog(b []byte) string {
 		return string(b[:maxLen]) + fmt.Sprintf("... (truncated %d bytes)", len(b)-maxLen)
 	}
 	return string(b)
+}
+
+// isTimeoutError 判断错误是否为超时类型 (ResponseHeaderTimeout 或客户端总超时触发)
+func isTimeoutError(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }

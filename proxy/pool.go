@@ -85,6 +85,13 @@ func (p *Pool) ReportConnectionFailure(node *Node) {
 	}
 }
 
+// ReportTimeout 记录响应头等待超时 (TCP 已连通、nginx 活着，只是 opencode.ai 响应慢)
+// 只计数不判定 Down，避免上游整体变慢时误伤节点
+func (p *Pool) ReportTimeout(node *Node) {
+	atomic.AddUint64(&node.Status5xxCount, 1)
+	atomic.StoreInt32(&node.consecutive5xx, 0)
+}
+
 func (p *Pool) ReportRateLimit(node *Node) {
 	atomic.AddUint64(&node.Status4xxCount, 1)
 	log.Printf("[%s] 节点触发 RateLimit/FreeUsageLimitError，开始进行容错与状态转换", node.Name)
