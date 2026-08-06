@@ -132,6 +132,13 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 	targetModel := r.cfg.GetMappedModel(clientModel)
 	log.Printf("收到请求 model: %s -> 映射为 targetModel: %s", clientModel, targetModel)
 
+	// 只序列化一次，重试/切换节点时复用同一 body，避免大 payload 重复 marshal
+	forwardBody, err := adapter.MarshalOpenAIRequest(payload, targetModel)
+	if err != nil {
+		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		return
+	}
+
 	httpClient := nonStreamClient
 	if isStream {
 		httpClient = streamClient
@@ -147,7 +154,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		}
 
 		// 2. 构建转发请求
-		httpReq, err := adapter.BuildOpenCodeHTTPRequest(req.Context(), node, payload, apiPath, targetModel, r.cfg.Server.Secret)
+		httpReq, err := adapter.BuildOpenCodeHTTPRequest(req.Context(), node, forwardBody, apiPath, r.cfg.Server.Secret)
 		if err != nil {
 			log.Printf("[%s] 构建请求失败: %v", node.Name, err)
 			r.pool.Report4xx(node)
@@ -180,7 +187,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 					return
 				}
 				// 重新构建请求 Header
-				httpReq, err = adapter.BuildOpenCodeHTTPRequest(req.Context(), node, payload, apiPath, targetModel, r.cfg.Server.Secret)
+				httpReq, err = adapter.BuildOpenCodeHTTPRequest(req.Context(), node, forwardBody, apiPath, r.cfg.Server.Secret)
 				if err != nil {
 					log.Printf("[%s] 重试时构建请求失败: %v", node.Name, err)
 					r.pool.Report4xx(node)
