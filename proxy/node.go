@@ -226,6 +226,14 @@ func (n *Node) processIPChange() {
 		n.RotateSession()
 		atomic.StoreInt32(&n.status, int32(StatusActive))
 		log.Printf("[%s] 健康检查通过，新公网 IP 连通正常，节点恢复 Active 状态", n.Name)
+
+		// 记录最新公网 IP 到文件（一节点一行）
+		if ip := extractPublicIP(string(output)); ip != "" {
+			persistIPRecord(ipRecordFile, n.Name, ip)
+			log.Printf("[%s] 最新公网 IP 已记录: %s", n.Name, ip)
+		} else {
+			log.Printf("[%s] 未能从换 IP 脚本输出中提取到新公网 IP，跳过记录", n.Name)
+		}
 	} else {
 		log.Printf("[%s] 30s 延迟后健康检查失败，节点置为 Down 状态", n.Name)
 		atomic.StoreInt32(&n.status, int32(StatusDown))
