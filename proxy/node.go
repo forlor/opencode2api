@@ -61,10 +61,11 @@ type Node struct {
 	coolingUntil time.Time  // 冷却截止时间
 
 	// 统计指标
-	TotalRequests uint64
+	TotalRequests  uint64
 	Status200Count uint64
 	Status4xxCount uint64
 	Status5xxCount uint64
+	Status429Count uint64
 	IPChangeCount  uint64
 
 	secret string // 局域网请求秘钥
@@ -189,9 +190,11 @@ func (n *Node) HandleRateLimit() {
 		go func() {
 			time.Sleep(n.CooldownDuration)
 			atomic.StoreInt32(&n.consecutive5xx, 0)
-			atomic.StoreInt32(&n.status, int32(StatusActive))
-			n.RotateSession()
-			log.Printf("[%s] 节点冷却完毕，自动恢复为 Active 状态", n.Name)
+			// CAS 防覆盖：仅当节点仍处于冷却状态时恢复 Active，避免覆盖换 IP/健康检查等其他流程的状态变更
+			if atomic.CompareAndSwapInt32(&n.status, int32(StatusCooling), int32(StatusActive)) {
+				n.RotateSession()
+				log.Printf("[%s] 节点冷却完毕，自动恢复为 Active 状态", n.Name)
+			}
 		}()
 	}
 }
@@ -258,6 +261,7 @@ type NodeSnapshot struct {
 	Status200Count    uint64     `json:"status_200_count"`
 	Status4xxCount    uint64     `json:"status_4xx_count"`
 	Status5xxCount    uint64     `json:"status_5xx_count"`
+	Status429Count    uint64     `json:"status_429_count"`
 	IPChangeCount     uint64     `json:"ip_change_count"`
 }
 
@@ -278,6 +282,7 @@ func (n *Node) Snapshot() NodeSnapshot {
 		Status200Count:    atomic.LoadUint64(&n.Status200Count),
 		Status4xxCount:    atomic.LoadUint64(&n.Status4xxCount),
 		Status5xxCount:    atomic.LoadUint64(&n.Status5xxCount),
+		Status429Count:    atomic.LoadUint64(&n.Status429Count),
 		IPChangeCount:     atomic.LoadUint64(&n.IPChangeCount),
 	}
 

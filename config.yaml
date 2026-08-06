@@ -16,9 +16,9 @@ nodes:
     supports_ip_change: false
     cooldown_duration: "30m"
   - name: "vps-node-sg-2"
-    lan_url: "http://100.96.0.3:22578" # VPS 1 局域网 Nginx 入口
+    lan_url: "http://100.96.0.11:22578" # VPS 1 局域网 Nginx 入口
     supports_ip_change: true
-    ip_change_command: "/home/xyz/project/opencode2api/venv/bin/python /home/xyz/project/opencode2api/routeip/rotate_ip_multi.py --profile DEFAULT --instance-id ocid1.instance.oc1.ap-singapore-1.anzwsljr2szbtcic7he2jeh6ffh4rfctwd2vvzj6mq7unnsmups74whuj3ta"
+    ip_change_command: "/home/xyz/project/opencode2api/venv/bin/python /home/xyz/project/opencode2api/routeip/rotate_ip_multi.py --profile DEFAULT --instance-id ocid1.instance.oc1.ap-singapore-1.anzwsljr2szbtcicevlrrkklh5cce6gglzknokkihimket2a2fnkjztk44ea"
     cooldown_duration: "30m"
   - name: "vps-node-cc1"
     lan_url: "http://100.96.0.8:22578"

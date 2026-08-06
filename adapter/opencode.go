@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -35,7 +36,8 @@ func ParseOpenAIRequest(rawBody []byte) (map[string]interface{}, error) {
 // BuildOpenCodeHTTPRequest 将 OpenAI 请求转化为符合 OpenCode 规范的 http.Request
 // 接收已解析的 payload map，仅替换 model 字段，其余参数原样透传
 // apiPath 为客户端入口路径（如 /v1/chat/completions、/v1/messages），转发到节点相同路径
-func BuildOpenCodeHTTPRequest(node *proxy.Node, payload map[string]interface{}, apiPath, mappedModel, secret string) (*http.Request, error) {
+// ctx 传入客户端请求的 context，客户端断开后上游请求会被同步取消
+func BuildOpenCodeHTTPRequest(ctx context.Context, node *proxy.Node, payload map[string]interface{}, apiPath, mappedModel, secret string) (*http.Request, error) {
 	if payload == nil {
 		payload = make(map[string]interface{})
 	}
@@ -48,7 +50,7 @@ func BuildOpenCodeHTTPRequest(node *proxy.Node, payload map[string]interface{}, 
 	}
 
 	url := node.LANURL + "/zen" + apiPath
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(bodyBytes))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(bodyBytes))
 	if err != nil {
 		return nil, err
 	}

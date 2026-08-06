@@ -2,10 +2,15 @@ package adapter
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
+
+// streamIdleTimeout 上游 SSE 流无数据超时：超过该时长未收到任何数据视为流卡死，主动断开
+const streamIdleTimeout = 180 * time.Second
 
 // HandleStreamForwarding 读取 OpenCode 的 SSE 响应，将其实时透传给客户端，并支持检测流初期的错误
 func HandleStreamForwarding(w http.ResponseWriter, resp *http.Response) error {
@@ -19,6 +24,10 @@ func HandleStreamForwarding(w http.ResponseWriter, resp *http.Response) error {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
+	// 卡死检测：长时间无数据则关闭上游连接，中断阻塞的 Read，避免 goroutine/连接永久挂起
+	idleTimer := time.AfterFunc(streamIdleTimeout, func() { resp.Body.Close() })
+	defer idleTimer.Stop()
+
 	reader := bufio.NewReader(resp.Body)
 
 	for {
@@ -29,6 +38,8 @@ func HandleStreamForwarding(w http.ResponseWriter, resp *http.Response) error {
 			err = nil
 		}
 		if len(line) > 0 {
+			// 收到数据即视为流存活，重置卡死计时
+			idleTimer.Reset(streamIdleTimeout)
 			// 直接写给客户端并立即刷盘；若客户端已断开，停止转发避免 goroutine 泄漏
 			if _, werr := w.Write(line); werr != nil {
 				return werr
@@ -86,25 +97,43 @@ func ReadAndCheckStreamInitialError(resp *http.Response) ([]byte, bool, error) {
 	}
 
 	// 状态码是 200 时，仍有可能是包裹在 SSE 数据中的错误 JSON
-	// 使用较大的 Peek 窗口，避免长错误消息（message 较长时）漏检
+	// 逐行增量扫描前几行：每行到达立即检测并返回，避免 Peek 阻塞攒满缓冲导致首包延迟；
+	// 扫描行数/字节数双上限，防止异常大行或长流拖慢透传（OpenCode 的错误总是流开头的第一条消息）
+	const (
+		maxScanBytes = 8 * 1024
+		maxScanLines = 8
+	)
 	reader := bufio.NewReaderSize(resp.Body, 64*1024)
-	peekBytes, err := reader.Peek(8 * 1024)
-	if err != nil && err != io.EOF {
-		return nil, false, err
+	var scanned []byte
+	scanLines := 0
+
+	for scanLines < maxScanLines && len(scanned) <= maxScanBytes {
+		line, err := reader.ReadSlice('\n')
+		// ErrBufferFull 表示单行超过内部缓冲，改用 ReadBytes 读完整行
+		if err == bufio.ErrBufferFull {
+			line = append(append([]byte(nil), line...), readRemaining(reader)...)
+			err = nil
+		}
+		scanned = append(scanned, line...)
+		scanLines++
+
+		if CheckIsFreeUsageLimitError(scanned) {
+			fullBody, _ := io.ReadAll(resp.Body)
+			return append(scanned, fullBody...), true, nil
+		}
+		if err != nil {
+			break
+		}
 	}
 
-	if CheckIsFreeUsageLimitError(peekBytes) {
-		fullBody, _ := io.ReadAll(resp.Body)
-		return append(peekBytes, fullBody...), true, nil
-	}
-
-	// reader (bufio.Reader) 内部已保留 Peek 过的缓存数据，直接使用 reader 即可，切勿使用 MultiReader 重复拼接
+	// reader (bufio.Reader) 内部保留着未读的缓存数据，将其与已扫描的 scanned 拼接放回，
+	// 保证后续透传完整无重复；切勿直接使用 MultiReader 拼接旧 body
 	oldBody := resp.Body
 	resp.Body = struct {
 		io.Reader
 		io.Closer
 	}{
-		Reader: reader,
+		Reader: io.MultiReader(bytes.NewReader(scanned), reader),
 		Closer: oldBody,
 	}
 

@@ -93,7 +93,7 @@ func (p *Pool) ReportTimeout(node *Node) {
 }
 
 func (p *Pool) ReportRateLimit(node *Node) {
-	atomic.AddUint64(&node.Status4xxCount, 1)
+	atomic.AddUint64(&node.Status429Count, 1)
 	log.Printf("[%s] 节点触发 RateLimit/FreeUsageLimitError，开始进行容错与状态转换", node.Name)
 	node.HandleRateLimit()
 }

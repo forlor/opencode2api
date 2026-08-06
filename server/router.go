@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -146,7 +147,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		}
 
 		// 2. 构建转发请求
-		httpReq, err := adapter.BuildOpenCodeHTTPRequest(node, payload, apiPath, targetModel, r.cfg.Server.Secret)
+		httpReq, err := adapter.BuildOpenCodeHTTPRequest(req.Context(), node, payload, apiPath, targetModel, r.cfg.Server.Secret)
 		if err != nil {
 			log.Printf("[%s] 构建请求失败: %v", node.Name, err)
 			r.pool.Report4xx(node)
@@ -156,6 +157,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		// 3. 发起请求 (如果遇到 503 等服务端抖动，进行最多 3 次指数退避重试: 1s, 2s, 4s)
 		var resp *http.Response
 		var respErr error
+		buildFailed := false
 
 		for retry := 0; retry < 3; retry++ {
 			if retry > 0 {
@@ -170,9 +172,21 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 				} else {
 					log.Printf("[%s] 遇到服务端临时异常(%d)，进行第 %d 次指数退避重试，等待 %v...", node.Name, lastStatus, retry, backoff)
 				}
-				time.Sleep(backoff)
+				// 客户端已断开时不再空等退避，直接终止重试
+				select {
+				case <-time.After(backoff):
+				case <-req.Context().Done():
+					log.Printf("[%s] 客户端已断开，终止重试", node.Name)
+					return
+				}
 				// 重新构建请求 Header
-				httpReq, _ = adapter.BuildOpenCodeHTTPRequest(node, payload, apiPath, targetModel, r.cfg.Server.Secret)
+				httpReq, err = adapter.BuildOpenCodeHTTPRequest(req.Context(), node, payload, apiPath, targetModel, r.cfg.Server.Secret)
+				if err != nil {
+					log.Printf("[%s] 重试时构建请求失败: %v", node.Name, err)
+					r.pool.Report4xx(node)
+					buildFailed = true
+					break
+				}
 			}
 
 			resp, respErr = httpClient.Do(httpReq)
@@ -192,9 +206,14 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 				break
 			}
 			r.pool.Report5xx(node)
-			bodyBytes, _ := io.ReadAll(resp.Body)
+			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
 			resp.Body.Close()
 			log.Printf("[%s] 服务端临时异常响应详情 (第 %d 次): %s", node.Name, retry+1, truncateLog(bodyBytes))
+		}
+
+		// 重试期间构建请求失败，直接切换下一节点
+		if buildFailed {
+			continue
 		}
 
 		if respErr != nil || resp == nil {
@@ -210,7 +229,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 
 		// 内部指数退避重试耗尽后仍为 5xx，视为该节点服务端抖动，切换下一节点
 		if adapter.IsTemporaryServerError(resp.StatusCode) {
-			bodyBytes, _ := io.ReadAll(resp.Body)
+			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
 			resp.Body.Close()
 			log.Printf("[%s] 重试 3 次后仍为服务端临时错误 %d，自动切换下一节点，详情: %s", node.Name, resp.StatusCode, truncateLog(bodyBytes))
 			r.pool.Report5xx(node)
@@ -235,8 +254,11 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 				w.Write(errBody)
 			} else {
 				buf := copyBufPool.Get().([]byte)
-				io.CopyBuffer(w, resp.Body, buf)
+				_, cErr := io.CopyBuffer(w, resp.Body, buf)
 				copyBufPool.Put(buf)
+				if cErr != nil {
+					log.Printf("[%s] 透传错误响应失败: %v", node.Name, cErr)
+				}
 			}
 			resp.Body.Close()
 			return
@@ -260,8 +282,11 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 			w.Write(errBody)
 		} else {
 			buf := copyBufPool.Get().([]byte)
-			io.CopyBuffer(w, resp.Body, buf)
+			_, cErr := io.CopyBuffer(w, resp.Body, buf)
 			copyBufPool.Put(buf)
+			if cErr != nil {
+				log.Printf("[%s] 透传响应失败: %v", node.Name, cErr)
+			}
 		}
 		resp.Body.Close()
 		return
@@ -298,9 +323,15 @@ func (r *Router) buildModelsCache() {
 		modelSet[r.cfg.Default.FallbackModel] = true
 	}
 
-	modelList := make([]map[string]interface{}, 0, len(modelSet))
-	created := time.Now().Unix()
+	modelNames := make([]string, 0, len(modelSet))
 	for modelName := range modelSet {
+		modelNames = append(modelNames, modelName)
+	}
+	sort.Strings(modelNames)
+
+	modelList := make([]map[string]interface{}, 0, len(modelNames))
+	created := time.Now().Unix()
+	for _, modelName := range modelNames {
 		modelList = append(modelList, map[string]interface{}{
 			"id":       modelName,
 			"object":   "model",
