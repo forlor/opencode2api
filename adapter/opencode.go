@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -98,4 +99,102 @@ func CheckIsFreeUsageLimitError(bodyBytes []byte) bool {
 	}
 	// 包含关键字备用检查
 	return bytes.Contains(bodyBytes, []byte("FreeUsageLimitError")) || bytes.Contains(bodyBytes, []byte("Rate limit exceeded"))
+}
+
+// EmptyCompletionInfo 从上游"空完成"响应中提取的可读诊断信息
+type EmptyCompletionInfo struct {
+	ID    string
+	Model string
+}
+
+// ParseEmptyCompletion 判断上游响应体是否为"空完成"响应：
+// OpenAI chat.completion 结构但 message 无 content（缺失/空/null）且 finish_reason 为 null/空。
+// 通常代表上游模型未产出任何内容（免费额度受限/上下文过长/请求参数不受支持等）。
+// 命中时返回 true 与可从响应体提取的 id/model，便于生成可读错误信息。
+func ParseEmptyCompletion(body []byte) (bool, EmptyCompletionInfo) {
+	var m struct {
+		ID      string `json:"id"`
+		Object  string `json:"object"`
+		Model   string `json:"model"`
+		Choices []struct {
+			Message struct {
+				Role    string `json:"role"`
+				Content any    `json:"content"`
+			} `json:"message"`
+			FinishReason any `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &m); err != nil {
+		return false, EmptyCompletionInfo{}
+	}
+	if m.Object != "chat.completion" && m.Object != "chat.completion.chunk" {
+		return false, EmptyCompletionInfo{}
+	}
+	if len(m.Choices) == 0 {
+		return false, EmptyCompletionInfo{}
+	}
+	// 只判断首个 choice：错误响应通常只有一条
+	c := m.Choices[0]
+	if !isEmptyContent(c.Message.Content) || !isEmptyFinish(c.FinishReason) {
+		return false, EmptyCompletionInfo{}
+	}
+	return true, EmptyCompletionInfo{ID: m.ID, Model: m.Model}
+}
+
+// isEmptyContent 判断 content 是否为空：nil / 空白字符串 / 空内容块数组
+func isEmptyContent(v any) bool {
+	if v == nil {
+		return true
+	}
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t) == ""
+	case []any:
+		return len(t) == 0
+	}
+	return false
+}
+
+// isEmptyFinish 判断 finish_reason 是否为空：null 或空字符串
+func isEmptyFinish(v any) bool {
+	if v == nil {
+		return true
+	}
+	if s, ok := v.(string); ok {
+		return s == ""
+	}
+	return false
+}
+
+// BuildEmptyCompletionError 将"空完成"响应改造成带可读诊断信息的 OpenAI error 响应体。
+// 保留原始响应（截断）便于排查上游真实原因；状态码沿用上游状态码。
+func BuildEmptyCompletionError(info EmptyCompletionInfo, original []byte, nodeName string, statusCode int) []byte {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "上游节点 %s 返回空完成响应 (HTTP %d)：模型未产出任何内容，可能原因：免费额度受限、上下文过长或请求参数不受该模型支持。", nodeName, statusCode)
+	if info.Model != "" {
+		fmt.Fprintf(&sb, " 上游模型: %s。", info.Model)
+	}
+	if info.ID != "" {
+		fmt.Fprintf(&sb, " 请求ID: %s。", info.ID)
+	}
+	if len(original) > 0 {
+		fmt.Fprintf(&sb, " 原始响应: %s", truncateBytes(original))
+	}
+	b, _ := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"type":    "upstream_empty_response",
+			"message": sb.String(),
+			"code":    statusCode,
+		},
+	})
+	return b
+}
+
+// truncateBytes 截断原始响应体，避免错误信息过长刷屏
+func truncateBytes(b []byte) string {
+	const maxLen = 500
+	if len(b) > maxLen {
+		return string(b[:maxLen]) + "... (truncated)"
+	}
+	return string(b)
 }

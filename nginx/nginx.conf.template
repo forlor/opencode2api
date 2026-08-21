@@ -23,4 +23,29 @@ server {
         proxy_set_header Connection '';
         proxy_http_version 1.1;
     }
+
+    # Gemini 号池线路：/gemini/v1beta/... → https://generativelanguage.googleapis.com/v1beta/...
+    # 前缀替换（/gemini/ 被 proxy_pass 的尾部 / 吃掉），query（如 ?alt=sse）自动透传
+    location /gemini/ {
+        if ($http_x_proxy_secret != "YOUR_CONFIGURED_SECRET") {
+            return 403 "Forbidden";
+        }
+
+        proxy_pass https://generativelanguage.googleapis.com/;
+        proxy_ssl_server_name on;
+        proxy_ssl_name generativelanguage.googleapis.com;
+
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 600s;
+        proxy_connect_timeout 10s;
+
+        # Gemini 官方支持 x-goog-api-key 请求头（等价于 ?key=，避免 key 落入 access_log）
+        proxy_set_header x-goog-api-key $http_x_goog_api_key;
+        proxy_set_header Host generativelanguage.googleapis.com;
+        proxy_set_header Connection '';
+        proxy_http_version 1.1;
+
+        # 同 /：不附加 X-Forwarded-For / X-Real-IP，避免泄露主服务 IP
+    }
 }

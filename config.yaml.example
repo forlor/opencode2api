@@ -40,3 +40,48 @@ nodes:
     lan_url: "http://192.168.1.103:8080" # VPS 3 局域网 Nginx 入口
     supports_ip_change: false
     cooldown_duration: "30m"
+
+# ===== Gemini 号池线路（Google AI Studio 独立线路，与上方 nodes 并行、互不影响） =====
+# 未配置或 enabled: false 时不启用；此时所有请求恒走上方 OpenCode 节点线路（零行为变化）。
+# 每个节点 = 一个 VPS（出口 IP）+ 一组 API key，在 nginx 上新增 /gemini/ location 转发到
+# https://generativelanguage.googleapis.com/ （见 nginx/nginx.conf.template）。
+# key 一律走 x-goog-api-key 请求头，不落 nginx access_log。
+#
+# 三种入站协议均支持命中 Gemini 线路：
+#   OpenAI    POST /v1/chat/completions   （模型映射目标命中 models 列表即走本线路）
+#   Anthropic POST /v1/messages           （同上）
+#   原生      POST /v1beta/models/{model}:generateContent|:streamGenerateContent|:countTokens
+#             GET  /v1beta/models[/{model}]
+# 原生入口请求体原样透传（仅注入下述 force/safety 开关与 maxOutputTokens 兜底），
+# 模型名支持 -search/-code/-real/-fake/-minimal/-low/-medium/-high 后缀（任意组合，自动剥离）。
+# 认证兼容三种习惯：Authorization: Bearer <api_keys 之一> / x-goog-api-key 头 / ?key= query（校验后剥除）。
+gemini:
+  enabled: true
+  # force: true                      # 调试用：所有请求强制走 Gemini（忽略模型映射）
+  fallback_model: "gemini-2.5-flash" # 未命中映射时的兜底 Gemini 模型
+  default_max_output_tokens: 8192    # 缺 max_tokens 时的兜底（Gemini 缺 maxOutputTokens 会 400）
+  models:
+    - "gemini-*"                     # 目标模型允许列表（支持前缀通配），命中即走 Gemini
+  # client_models: ["my-gemini"]      # 可选：客户端模型名直接点名走 Gemini
+  mount_path: "/gemini"              # 节点 nginx 挂载前缀（与 nginx location 对应）
+  streaming_mode: "real"             # real|fake（可用 -real/-fake 模型后缀覆盖）
+  force_thinking: false
+  force_web_search: false
+  force_code_execution: false
+  force_url_context: false
+  safety_settings_threshold: "OFF"
+  # http_proxy: ""                   # 可选全局出站代理
+  key_cooldown_duration: "60s"       # 单 key 429 冷却时长（带随机抖动去同步）
+  ban_after_failures: 3              # 5xx/连接失败/403 连续失败阈值 → 禁用该 key
+  max_rpm: 0                         # 0=不限制（可选每 key 每分钟上限）
+  min_key_interval: "0s"             # 0=不限制（可选同 key 最小间隔）
+  nodes:
+    # 网关先换 key 再换节点：节点内 key 全部冷却后才切换到下一个节点
+    - name: "gem-vps-sg-01"
+      lan_url: "http://192.168.1.110:8080" # 与 OpenCode 同一 VPS nginx（需新增 /gemini/ location）
+      api_keys:                              # 该节点绑定的一组 key（建议几十个）
+        - "AIzaSy-xxxxxxxxxxxxxxxxxxxxxxxx"
+        - "AIzaSy-yyyyyyyyyyyyyyyyyyyyyyyyy"
+      # key_cooldown_duration: "60s"   # 可选：节点级覆盖全局
+      # max_rpm: 0
+      # min_key_interval: "0s"

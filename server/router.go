@@ -14,6 +14,7 @@ import (
 
 	"opencode2api/adapter"
 	"opencode2api/config"
+	"opencode2api/gemini"
 	"opencode2api/middleware"
 	"opencode2api/proxy"
 )
@@ -52,20 +53,26 @@ func setCORS(w http.ResponseWriter) {
 }
 
 type Router struct {
-	cfg         *config.Config
-	pool        *proxy.Pool
-	mux         *http.ServeMux
-	modelsCache []byte // 模型列表响应缓存（配置加载后不变）
+	cfg               *config.Config
+	pool              *proxy.Pool
+	gemPool           *gemini.Pool // Gemini 号池线路，未配置时为 nil
+	mux               *http.ServeMux
+	modelsCache       []byte // 模型列表响应缓存（配置加载后不变）
+	geminiModelsCache []byte // GET /v1beta/models 响应缓存（配置加载后不变）
 }
 
-func NewRouter(cfg *config.Config, pool *proxy.Pool) *Router {
+func NewRouter(cfg *config.Config, pool *proxy.Pool, gemPool *gemini.Pool) *Router {
 	r := &Router{
-		cfg:  cfg,
-		pool: pool,
-		mux:  http.NewServeMux(),
+		cfg:     cfg,
+		pool:    pool,
+		gemPool: gemPool,
+		mux:     http.NewServeMux(),
 	}
 
 	r.buildModelsCache()
+	if gemPool != nil && cfg.Gemini != nil && cfg.Gemini.Enabled {
+		r.buildGeminiModelsCache()
+	}
 	r.setupRoutes()
 	return r
 }
@@ -78,16 +85,26 @@ func (r *Router) setupRoutes() {
 	authMW := middleware.AuthMiddleware(r.cfg)
 
 	// API 路由
-	r.mux.Handle("/v1/chat/completions", authMW(http.HandlerFunc(r.handleChatCompletions)))
-	r.mux.Handle("/v1/messages", authMW(http.HandlerFunc(r.handleChatCompletions)))
-	r.mux.Handle("/v1/responses", authMW(http.HandlerFunc(r.handleChatCompletions)))
+	r.mux.Handle("/v1/chat/completions", authMW(http.HandlerFunc(r.handleUnified)))
+	r.mux.Handle("/v1/messages", authMW(http.HandlerFunc(r.handleUnified)))
+	r.mux.Handle("/v1/responses", authMW(http.HandlerFunc(r.handleUnified)))
 	r.mux.Handle("/v1/models", authMW(http.HandlerFunc(r.handleModels)))
+
+	// Gemini 原生入口（认证在 handler 内做：兼容 Bearer / x-goog-api-key / ?key=）
+	if r.gemPool != nil && r.cfg.Gemini != nil && r.cfg.Gemini.Enabled {
+		r.mux.HandleFunc("/v1beta/", r.handleGeminiNative)
+	}
 
 	// 监控 API
 	r.mux.HandleFunc("/admin/nodes", r.handleAdminNodes)
+	if r.gemPool != nil {
+		r.mux.HandleFunc("/admin/gemini", r.handleAdminGemini)
+	}
 }
 
-func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request) {
+// handleUnified 三条入站协议的统一分发壳：读 body → 解析 → RouteRequest 分流。
+// Gemini 线路命中 → handleGeminiChat；否则走现有 OpenCode 节点线路（零回归）。
+func (r *Router) handleUnified(w http.ResponseWriter, req *http.Request) {
 	setCORS(w)
 	if req.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
@@ -98,14 +115,13 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		return
 	}
 
-	// 转发到节点时保持与入口相同的路径，使 Anthropic(messages)/OpenAI(chat) 协议原样透传
-	apiPath := req.URL.Path
-
 	// 限制请求体大小，防止恶意超大 body 导致内存耗尽
 	req.Body = http.MaxBytesReader(w, req.Body, 10<<20) // 10MB
 
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
+		log.Printf("[req-stats] path=%s 读请求体失败(疑似超过10MB入站上限): %v (已读 %.2fMB)",
+			req.URL.Path, err, float64(len(bodyBytes))/mbSize)
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
@@ -116,6 +132,31 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 		return
 	}
+	logRequestStats(req.URL.Path, payload, len(bodyBytes))
+
+	clientModel, _ := payload["model"].(string)
+
+	// Gemini 未配置/未启用 → 恒 opencode（旧配置行为不变）
+	if r.gemPool != nil && r.cfg.Gemini != nil && r.cfg.Gemini.Enabled {
+		decision := r.cfg.RouteRequest(clientModel)
+		if decision.Line == config.LineGemini {
+			switch req.URL.Path {
+			case "/v1/chat/completions":
+				r.handleGeminiChat(w, req, payload, decision, len(bodyBytes))
+				return
+			case "/v1/messages":
+				r.handleGeminiClaudeChat(w, req, payload, decision, len(bodyBytes))
+				return
+			}
+			// /v1/responses 的 Gemini 转换尚未实现，回退 OpenCode 线路
+		}
+	}
+
+	r.handleOpenCodeChat(w, req, payload, req.URL.Path, len(bodyBytes))
+}
+
+func (r *Router) handleOpenCodeChat(w http.ResponseWriter, req *http.Request, payload map[string]any, apiPath string, bodyLen int) {
+	// 转发到节点时保持与入口相同的路径，使 Anthropic(messages)/OpenAI(chat) 协议原样透传
 
 	// 提取 stream / model 字段用于分流与模型映射
 	isStream, _ := payload["stream"].(bool)
@@ -130,7 +171,6 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 
 	// 根据客户端请求的模型，查询实际映射的目标模型
 	targetModel := r.cfg.GetMappedModel(clientModel)
-	log.Printf("收到请求 model: %s -> 映射为 targetModel: %s", clientModel, targetModel)
 
 	// 只序列化一次，重试/切换节点时复用同一 body，避免大 payload 重复 marshal
 	forwardBody, err := adapter.MarshalOpenAIRequest(payload, targetModel)
@@ -138,6 +178,8 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 		return
 	}
+	log.Printf("收到请求 model: %s -> 映射为 targetModel: %s, 入站 %.2fMB -> 转发 %.2fMB",
+		clientModel, targetModel, float64(bodyLen)/mbSize, float64(len(forwardBody))/mbSize)
 
 	httpClient := nonStreamClient
 	if isStream {
@@ -258,6 +300,11 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(resp.StatusCode)
 			if len(errBody) > 0 {
+				// 上游返回"空完成"响应（chat.completion 但无 content、finish_reason 为空）时，
+				// 改造成带可读诊断信息的错误体，避免客户端只看到空壳 JSON
+				if empty, info := adapter.ParseEmptyCompletion(errBody); empty {
+					errBody = adapter.BuildEmptyCompletionError(info, errBody, node.Name, resp.StatusCode)
+				}
 				w.Write(errBody)
 			} else {
 				buf := copyBufPool.Get().([]byte)
@@ -329,6 +376,15 @@ func (r *Router) buildModelsCache() {
 	if r.cfg.Default.FallbackModel != "" {
 		modelSet[r.cfg.Default.FallbackModel] = true
 	}
+	// 并入 Gemini 线路允许列表模型（只增不减，保留 deepseek/openai 模型）
+	if r.cfg.Gemini != nil {
+		for _, m := range r.cfg.Gemini.Models {
+			modelSet[m] = true
+		}
+		if r.cfg.Gemini.FallbackModel != "" {
+			modelSet[r.cfg.Gemini.FallbackModel] = true
+		}
+	}
 
 	modelNames := make([]string, 0, len(modelSet))
 	for modelName := range modelSet {
@@ -357,6 +413,20 @@ func (r *Router) buildModelsCache() {
 
 func (r *Router) handleAdminNodes(w http.ResponseWriter, req *http.Request) {
 	snaps := r.pool.Snapshots()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"total_nodes": len(snaps),
+		"nodes":       snaps,
+	})
+}
+
+// handleAdminGemini Gemini 号池状态快照（key 一律脱敏，只出前6+后4）
+func (r *Router) handleAdminGemini(w http.ResponseWriter, req *http.Request) {
+	if r.gemPool == nil {
+		http.Error(w, `{"error": "Gemini 线路未启用"}`, http.StatusNotFound)
+		return
+	}
+	snaps := r.gemPool.Snapshots(true)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"total_nodes": len(snaps),

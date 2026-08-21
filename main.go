@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"opencode2api/config"
+	"opencode2api/gemini"
 	"opencode2api/proxy"
 	"opencode2api/server"
 )
@@ -36,13 +37,22 @@ func main() {
 	// 初始化节点调度池
 	pool := proxy.NewPool(cfg)
 
+	// 初始化 Gemini 号池线路（未配置时为空池，路由层恒走 OpenCode）
+	var gemPool *gemini.Pool
+	if cfg.Gemini != nil {
+		gemPool = gemini.NewPool(cfg.Gemini, cfg.Server.Secret)
+	}
+
 	// 初始化 HTTP 路由服务
-	router := server.NewRouter(cfg, pool)
+	router := server.NewRouter(cfg, pool, gemPool)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	log.Printf("OpenCode2API 服务已启动，监听地址: http://%s", addr)
 	log.Printf("OpenAI 接口地址: http://%s/v1/chat/completions", addr)
 	log.Printf("监控查看 API 地址: http://%s/admin/nodes", addr)
+	if gemPool != nil {
+		log.Printf("Gemini 线路已启用，节点数: %d，监控地址: http://%s/admin/gemini", gemPool.Len(), addr)
+	}
 
 	srv := &http.Server{
 		Addr:              addr,
