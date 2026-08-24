@@ -256,7 +256,40 @@ default:
 	if cfg.Gemini != nil {
 		t.Fatal("未配置 gemini 时应为 nil")
 	}
+	if cfg.Server.MaxBodyMB != 100 {
+		t.Fatalf("max_body_mb 未配置时应默认 100，得到 %d", cfg.Server.MaxBodyMB)
+	}
 	if dec := cfg.RouteRequest("gpt-4o"); dec.Line != LineOpenCode {
 		t.Fatalf("无 gemini 配置应恒 opencode，得到 %+v", dec)
+	}
+}
+
+// max_body_mb 显式配置生效；负数/零回退默认
+func TestLoadConfig_MaxBodyMB(t *testing.T) {
+	write := func(t *testing.T, serverExtra string) *Config {
+		t.Helper()
+		yamlContent := `
+server:
+  port: 8080
+` + serverExtra + `
+default:
+  fallback_model: "x"
+`
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(yamlContent), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+
+	if cfg := write(t, "  max_body_mb: 64"); cfg.Server.MaxBodyMB != 64 {
+		t.Fatalf("max_body_mb: 64 应生效，得到 %d", cfg.Server.MaxBodyMB)
+	}
+	if cfg := write(t, "  max_body_mb: -5"); cfg.Server.MaxBodyMB != 100 {
+		t.Fatalf("负数 max_body_mb 应回退默认 100，得到 %d", cfg.Server.MaxBodyMB)
 	}
 }

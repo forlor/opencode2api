@@ -98,11 +98,12 @@ func (r *Router) handleGeminiNative(w http.ResponseWriter, req *http.Request) {
 
 // handleGeminiNativeAction POST models/{model}:{action}：模型后缀剥离 + 请求体微调 + geminiExec 编排
 func (r *Router) handleGeminiNativeAction(w http.ResponseWriter, req *http.Request, model, action string) {
-	req.Body = http.MaxBytesReader(w, req.Body, 10<<20) // 10MB，与 OpenAI 线路一致
+	limitMB := inboundBodyLimitMB(r.cfg)
+	req.Body = http.MaxBytesReader(w, req.Body, int64(limitMB)<<20) // 与 OpenAI 线路一致，可配
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
-		log.Printf("[req-stats] path=%s 读请求体失败(疑似超过10MB入站上限): %v (已读 %.2fMB)",
-			req.URL.Path, err, float64(len(body))/mbSize)
+		log.Printf("[req-stats] path=%s 读请求体失败(疑似超过%dMB入站上限): %v (已读 %.2fMB)",
+			req.URL.Path, limitMB, err, float64(len(body))/mbSize)
 		writeRawJSON(w, http.StatusBadRequest,
 			[]byte(`{"error":{"code":400,"message":"Failed to read request body","status":"INVALID_ARGUMENT"}}`))
 		return
@@ -111,7 +112,7 @@ func (r *Router) handleGeminiNativeAction(w http.ResponseWriter, req *http.Reque
 	// 原生协议入站即 Gemini 格式，复用统一统计（解析失败不影响转发）
 	var nativePayload map[string]any
 	if json.Unmarshal(body, &nativePayload) == nil && nativePayload != nil {
-		logRequestStats(req.URL.Path, nativePayload, len(body))
+		logRequestStats(req.URL.Path, nativePayload, len(body), limitMB)
 	}
 
 	suffix := gemini.ParseModelSuffixes(model)

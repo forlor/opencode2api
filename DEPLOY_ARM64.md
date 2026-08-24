@@ -59,6 +59,9 @@ server {
     listen 8080;
     server_name _;
 
+    # 入站请求体上限：与 Go 主服务 max_body_mb 对齐（nginx 默认仅 1MB，会话涨过 1MB 即被 413 拒绝）
+    client_max_body_size 100m;
+
     location / {
         # 1. 验证来自 Go 主服务的 Secret 请求头 (与 config.yaml 中的 secret 对应)
         if ($http_x_proxy_secret != "your-lan-proxy-secret-123456") {

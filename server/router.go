@@ -115,13 +115,14 @@ func (r *Router) handleUnified(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// 限制请求体大小，防止恶意超大 body 导致内存耗尽
-	req.Body = http.MaxBytesReader(w, req.Body, 10<<20) // 10MB
+	// 限制请求体大小，防止恶意超大 body 导致内存耗尽（上限可配，默认 100MB）
+	limitMB := inboundBodyLimitMB(r.cfg)
+	req.Body = http.MaxBytesReader(w, req.Body, int64(limitMB)<<20)
 
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
-		log.Printf("[req-stats] path=%s 读请求体失败(疑似超过10MB入站上限): %v (已读 %.2fMB)",
-			req.URL.Path, err, float64(len(bodyBytes))/mbSize)
+		log.Printf("[req-stats] path=%s 读请求体失败(疑似超过%dMB入站上限): %v (已读 %.2fMB)",
+			req.URL.Path, limitMB, err, float64(len(bodyBytes))/mbSize)
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
@@ -132,7 +133,7 @@ func (r *Router) handleUnified(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 		return
 	}
-	logRequestStats(req.URL.Path, payload, len(bodyBytes))
+	logRequestStats(req.URL.Path, payload, len(bodyBytes), limitMB)
 
 	clientModel, _ := payload["model"].(string)
 

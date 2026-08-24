@@ -5,6 +5,7 @@ server:
     - "sk-opencode-secret-key-1"
     - "sk-opencode-secret-key-2"
   secret: "your-lan-proxy-secret-123456" # 局域网 Nginx 内部安全校验 Header (与 Nginx 中的 $http_x_proxy_secret 对应)
+  max_body_mb: 100 # 入站请求体上限（MB），默认 100；需与节点 nginx 的 client_max_body_size 一致
 
 default:
   cooldown_duration: "30m" # 默认冷却时长，不可换 IP 节点触发 429 后进入冷却

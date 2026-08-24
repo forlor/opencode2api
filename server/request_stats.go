@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"strings"
+
+	"opencode2api/config"
 )
 
 // reqStats 单个请求的体积统计，用于排查"会话越用越大 / Request too large"类问题
@@ -16,11 +18,21 @@ type reqStats struct {
 
 const mbSize = 1024 * 1024
 
+// inboundBodyLimitMB 入站请求体上限（MB）。LoadConfig 会填默认值 100，
+// 这里对绕过 LoadConfig 直接构造 Config 的场景（如测试）再兜底一次，避免 0 上限拒绝所有请求。
+func inboundBodyLimitMB(cfg *config.Config) int {
+	if cfg != nil && cfg.Server.MaxBodyMB > 0 {
+		return cfg.Server.MaxBodyMB
+	}
+	return 100
+}
+
 // logRequestStats 在入口解析成功后输出一行请求体积统计。
+// limitMB 为当前配置的入站请求体上限，body 达到其 80% 时行尾追接近上限提示。
 // 排查方法：客户端报 "Request too large (max 32MB)" 时——
 //   - 日志中无对应行 → 客户端在发送前本地拦截，请求未到达代理；
-//   - 有对应行且 body 接近上限 → 同时会出现"读请求体失败"日志，说明被代理 10MB 入站上限挡下。
-func logRequestStats(path string, payload map[string]any, bodyLen int) {
+//   - 有对应行且 body 接近上限 → 同时会出现"读请求体失败"日志，说明被代理入站上限挡下。
+func logRequestStats(path string, payload map[string]any, bodyLen, limitMB int) {
 	st := collectRequestStats(payload)
 
 	model, _ := payload["model"].(string)
@@ -29,8 +41,8 @@ func logRequestStats(path string, payload map[string]any, bodyLen int) {
 		stream = fmt.Sprintf(" stream=%v", v)
 	}
 	warn := ""
-	if bodyLen >= 8*mbSize {
-		warn = " (接近10MB入站上限)"
+	if int64(bodyLen) >= int64(limitMB)*mbSize*4/5 {
+		warn = fmt.Sprintf(" (接近%dMB入站上限)", limitMB)
 	}
 	log.Printf("[req-stats] path=%s model=%s%s body=%.2fMB msgs=%d imgs=%d(imgBytes=%.2fMB) urlImgs=%d%s",
 		path, model, stream,
