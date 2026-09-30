@@ -1,0 +1,4 @@
+# 真实密钥与本地运行时文件，绝不入库
+key.txt
+config.local-test.yaml
+gemini_daily_usage*.json
