@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // ErrKind Gemini 上游错误的业务分类，用于决定 key 的处理策略
@@ -14,7 +15,8 @@ type ErrKind int
 
 const (
 	ErrNone         ErrKind = iota // 健康流/无错误
-	ErrRateLimit                   // 429 / RESOURCE_EXHAUSTED → 换 key + 冷却
+	ErrRateLimit                   // 429 / RESOURCE_EXHAUSTED 分钟级限流（RPM/TPM/未知）→ 换 key + 短冷却
+	ErrDailyQuota                  // 429 每日配额（RPD）→ 该 key 该模型冷却到次日重置时刻
 	ErrInvalidKey                  // 403 / API key not valid → ban 该 key
 	ErrTemporary                   // 5xx / UNAVAILABLE → 指数退避重试
 	ErrDeterministic               // 400/404/422 等 → 直接透传给客户端，不烧 key
@@ -26,6 +28,8 @@ func (k ErrKind) String() string {
 		return "none"
 	case ErrRateLimit:
 		return "rate_limit"
+	case ErrDailyQuota:
+		return "daily_quota"
 	case ErrInvalidKey:
 		return "invalid_key"
 	case ErrTemporary:
@@ -80,11 +84,22 @@ func ClassifyGeminiHttp(status int, body []byte) ErrKind {
 	return ErrNone
 }
 
+// looksLikeDailyQuota 判定 429 消息是否为每日配额（RPD）型：
+// Google 文案如 "GenerateRequestsPerDayPerProjectPerModel-free-tier ... Limit: 20 ... Exceeded"、
+// "daily quota"（大小写不敏感、忽略空格差异）
+func looksLikeDailyQuota(message string) bool {
+	m := strings.ReplaceAll(strings.ToLower(message), " ", "")
+	return strings.Contains(m, "perday") || strings.Contains(m, "dailyquota")
+}
+
 // ClassifyErrorStatus 按 Gemini error.status / message 分类
 func ClassifyErrorStatus(status, message string) ErrKind {
 	s := strings.ToUpper(strings.TrimSpace(status))
 	switch {
 	case s == "RESOURCE_EXHAUSTED" || s == "RATE_LIMIT_EXCEEDED":
+		if looksLikeDailyQuota(message) {
+			return ErrDailyQuota
+		}
 		return ErrRateLimit
 	case s == "PERMISSION_DENIED" || s == "UNAUTHENTICATED":
 		return ErrInvalidKey
@@ -99,12 +114,39 @@ func ClassifyErrorStatus(status, message string) ErrKind {
 		return ErrInvalidKey
 	}
 	if strings.Contains(lower, "rate limit") || strings.Contains(lower, "resource exhausted") {
+		if looksLikeDailyQuota(message) {
+			return ErrDailyQuota
+		}
 		return ErrRateLimit
 	}
 	if status != "" {
 		return ErrDeterministic
 	}
 	return ErrTemporary
+}
+
+// ParseRetryDelay 从 Gemini 错误体解析 RetryInfo.retryDelay（如 "27s"/"3600s"），
+// 这是 Google 官方建议的退避时长，供 RPM/TPM/未知型 429 精确冷却；解析不到返回 false。
+func ParseRetryDelay(body []byte) (time.Duration, bool) {
+	gerr, ok := ParseGeminiError(body)
+	if !ok {
+		return 0, false
+	}
+	for _, d := range gerr.Details {
+		dm, ok := d.(map[string]any)
+		if !ok {
+			continue
+		}
+		if t, _ := dm["@type"].(string); t != "type.googleapis.com/google.rpc.RetryInfo" {
+			continue
+		}
+		if ds, _ := dm["retryDelay"].(string); ds != "" {
+			if dur, err := time.ParseDuration(ds); err == nil && dur > 0 {
+				return dur, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // ReadAndCheckGeminiStreamError 检查流/响应的开头是否立即返回了错误。

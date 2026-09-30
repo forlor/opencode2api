@@ -76,13 +76,27 @@ gemini:
   ban_after_failures: 3              # 5xx/连接失败/403 连续失败阈值 → 禁用该 key
   max_rpm: 0                         # 0=不限制（可选每 key 每分钟上限）
   min_key_interval: "0s"             # 0=不限制（可选同 key 最小间隔）
+  key_strategy: "round_robin"        # round_robin（默认，轮询）| sequential（顺序消耗：主力 key 配额耗尽/冷却/限速才换下一个；仅在途时临时借用其他 key，空闲后回归主力）
+  daily_limit: 0                     # 每 key 每模型每日生成请求上限（Google 免费层约 20）；0=不限制（默认）
+  daily_reset_tz: "America/Los_Angeles" # 每日配额重置时区（Google 免费额度按太平洋时间午夜重置）
+  daily_usage_file: "gemini_daily_usage.json" # 每日用量持久化文件（跨重启保留计数，key 以 sha256 脱敏存储）
+  # upstream_host: "gemini-pool"     # 双 conf 部署时子节点 nginx gemini server 块的 server_name（见 nginx/gemini.conf.template）；空=不设 Host 头
   nodes:
     # 网关先换 key 再换节点：节点内 key 全部冷却后才切换到下一个节点
     - name: "gem-vps-sg-01"
-      lan_url: "http://192.168.1.110:8080" # 与 OpenCode 同一 VPS nginx（需新增 /gemini/ location）
+      # 单 conf 部署（默认示例形态）：与 OpenCode 同一 VPS nginx 同一 server
+      # （nginx.conf.template 已自带 /gemini/ location），不配 upstream_host
+      lan_url: "http://192.168.1.110:8080"
+      # 双 conf 部署（见 nginx/gemini.conf.template）：子节点 nginx 同端口跑两个 server 块，
+      # lan_url 指向该端口且必须配 upstream_host 路由到 gemini server 块：
+      #   lan_url: "http://192.168.1.110:22578"
+      #   upstream_host: "gemini-pool"
       api_keys:                              # 该节点绑定的一组 key（建议几十个）
         - "AIzaSy-xxxxxxxxxxxxxxxxxxxxxxxx"
         - "AIzaSy-yyyyyyyyyyyyyyyyyyyyyyyyy"
       # key_cooldown_duration: "60s"   # 可选：节点级覆盖全局
       # max_rpm: 0
       # min_key_interval: "0s"
+      # key_strategy: "sequential"     # 可选：节点级覆盖（round_robin|sequential）
+      # daily_limit: 20                # 可选：节点级覆盖（0=继承全局）
+      # upstream_host: "gemini-pool"   # 可选：节点级覆盖（空=继承全局）

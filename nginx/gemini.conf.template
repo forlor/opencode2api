@@ -1,0 +1,57 @@
+# Gemini 号池独立 server 块（双 conf 部署形态）：
+# 与 opencode.conf 监听同一端口，靠 server_name 区分路由——
+#   主服务 config.yaml 的 gemini.upstream_host 配 "gemini-pool"，
+#   出站请求带 Host: gemini-pool，被本 server 精确匹配；
+#   其余 Host（OpenCode 流量为 IP:端口）落回 opencode.conf 兜底。
+#
+# 部署步骤：
+#   1. 本文件放入子节点 nginx conf 目录（如 /etc/nginx/conf.d/gemini.conf），
+#      secret 与 opencode.conf 保持一致
+#   2. 现有 opencode.conf 的 listen 行加 default_server：
+#      listen 22578 default_server;
+#      （同端口双 server 后，nginx 将"第一个被加载的 server"作为 Host 不匹配时的兜底，
+#       conf.d 按字母序 include 时 gemini.conf 排在前面，OpenCode 流量会错误落进本 server 导致 404；
+#       显式标记后 opencode 永远是兜底，与加载顺序无关）
+#   3. nginx -t && nginx -s reload
+#
+# 注意：子节点未部署 /gemini/ 转发（本文件或 location 均可）前，不要启用 gemini 线路——
+# 启动探测会被 opencode 的 location / 兜底转发到 opencode.ai 返回 404，导致所有 key 被误 Ban。
+server {
+    listen 22578;
+    server_name gemini-pool; # 对应主服务 gemini.upstream_host 配置
+
+    # 入站请求体上限：与 Go 主服务 max_body_mb 对齐——nginx 读不到主服务配置，
+    # 主服务调整 max_body_mb 时此处必须同步修改，否则大请求会被此处 413 拒绝
+    # （413 按确定性错误透传，表象是"上游 413"，排查困难）
+    client_max_body_size 100m;
+
+    location /gemini/ {
+        # 验证来自 Go 主服务的 Secret 请求头
+        if ($http_x_proxy_secret != "YOUR_CONFIGURED_SECRET") {
+            return 403 "Forbidden";
+        }
+
+        # 前缀替换转发：/gemini/v1beta/... → https://generativelanguage.googleapis.com/v1beta/...
+        # （/gemini/ 被尾部 / 吃掉，query 如 ?alt=sse 自动透传）
+        proxy_pass https://generativelanguage.googleapis.com/;
+        proxy_ssl_server_name on;
+        proxy_ssl_name generativelanguage.googleapis.com;
+
+        # SSE 流式推流
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_connect_timeout 60s;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+
+        # key 一律走 x-goog-api-key 请求头（等价 ?key=，避免 key 落 access_log）
+        proxy_set_header x-goog-api-key $http_x_goog_api_key;
+        proxy_set_header Host generativelanguage.googleapis.com;
+        # 内网鉴权头到此为止，不向 Google 透传
+        proxy_set_header X-Proxy-Secret "";
+        proxy_set_header Connection '';
+        proxy_http_version 1.1;
+
+        # 不附加 X-Forwarded-For / X-Real-IP / Via，避免泄露主服务 IP
+    }
+}

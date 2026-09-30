@@ -159,6 +159,19 @@ func newTestRouter(cfg *config.Config) *Router {
 	return NewRouter(cfg, proxy.NewPool(cfg), gemini.NewPool(cfg.Gemini, cfg.Server.Secret))
 }
 
+// waitCond 轮询等待条件成立（超时致命）。启动探测等异步协程没有同步点时用它对齐时序
+func waitCond(t *testing.T, timeout time.Duration, desc string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("等待 %s 超时", desc)
+}
+
 func doPost(t *testing.T, rt *Router, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
@@ -373,5 +386,111 @@ func TestE2E_AdminGemini(t *testing.T) {
 	}
 	if !strings.Contains(body, "AIzaSy...0001") {
 		t.Fatalf("应包含脱敏 key ID: %s", body)
+	}
+}
+
+// 每日配额（RPD）型 429：换 key 重试成功；首个 key 状态保持 Active（per-model 标记，不进 Cooling），快照含 daily_usage
+func TestE2E_GeminiDaily429(t *testing.T) {
+	fake := newFakeGeminiNode(t,
+		fakeResp{429, geminiErrBody("RESOURCE_EXHAUSTED", "You exceeded your quota limit GenerateRequestsPerDayPerProjectPerModel-free-tier Limit 20 Exceeded")},
+		fakeResp{200, geminiNonStreamOK},
+	)
+	keys := []string{"AIzaSy-e2e-daily-key-aaaa", "AIzaSy-e2e-daily-key-bbbb"}
+	rt := newTestRouter(geminiTestConfig(fake.URL(), keys))
+
+	w := doPost(t, rt, "/v1/chat/completions", `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("换 key 后应成功，status = %d, body=%s", w.Code, w.Body.String())
+	}
+	calls := fake.postCalls()
+	if len(calls) != 2 {
+		t.Fatalf("上游生成调用次数 = %d, want 2", len(calls))
+	}
+	// 首个 key：Active（非 Cooling）+ daily_usage 标记耗尽
+	wantMarked := maskKeyID(calls[0].key)
+	n := rt.gemPool.Nodes()[0]
+	var marked bool
+	for _, ks := range n.Snapshot(true).Keys {
+		if ks.ID != wantMarked {
+			continue
+		}
+		if ks.Status != "Active" {
+			t.Fatalf("daily 429 是 per-model 标记，key 应保持 Active: %+v", ks)
+		}
+		du := ks.DailyUsage["gemini-2.5-flash"]
+		if du.Used == 0 || du.ExhaustedUntil == "" {
+			t.Fatalf("daily_usage 应记录用量与耗尽时刻: %+v", ks.DailyUsage)
+		}
+		marked = true
+	}
+	if !marked {
+		t.Fatalf("未找到被标记的 key %s", wantMarked)
+	}
+}
+
+// upstream_host：配置后所有出站请求（探测+生成）带 Host 头；未配置时用 lan_url 的原生 Host
+func TestE2E_GeminiUpstreamHost(t *testing.T) {
+	var mu sync.Mutex
+	var hosts []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hosts = append(hosts, r.Host)
+		mu.Unlock()
+		if strings.Contains(strings.ToLower(r.URL.Path), "generatecontent") {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(geminiNonStreamOK)
+			return
+		}
+		w.Write([]byte(`{"models":[{"name":"models/gemini-2.5-flash"}]}`))
+	}))
+	defer srv.Close()
+
+	// 配置 upstream_host：探测与生成请求的 Host 均为 gemini-pool。
+	// 探测由 NewRouter 异步发起（go startProbe），无同步点——用 waitCond 等它到达后再采样
+	cfg := geminiTestConfig(srv.URL, []string{"AIzaSy-e2e-host-key-0001"})
+	cfg.Gemini.UpstreamHost = "gemini-pool"
+	rt := newTestRouter(cfg)
+	if w := doPost(t, rt, "/v1/chat/completions", `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`); w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	waitCond(t, 3*time.Second, "探测+生成请求到达", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(hosts) >= 2
+	})
+	mu.Lock()
+	sampled := append([]string(nil), hosts...)
+	mu.Unlock()
+	if len(sampled) < 2 {
+		t.Fatalf("应有探测+生成至少 2 次请求，得到 %d", len(sampled))
+	}
+	for _, h := range sampled {
+		if h != "gemini-pool" {
+			t.Fatalf("Host = %q, want gemini-pool", h)
+		}
+	}
+
+	// 未配置 upstream_host：Host 为 lan_url 原生地址（127.0.0.1:port）。
+	// 清空后等待 rt2 的探测+生成到达再断言（rt1 的迟到请求此时已全部落地）
+	mu.Lock()
+	hosts = nil
+	mu.Unlock()
+	rt2 := newTestRouter(geminiTestConfig(srv.URL, []string{"AIzaSy-e2e-host-key-0002"}))
+	if w := doPost(t, rt2, "/v1/chat/completions", `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`); w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	waitCond(t, 3*time.Second, "rt2 探测+生成请求到达", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(hosts) >= 2
+	})
+	mu.Lock()
+	sampled = append([]string(nil), hosts...)
+	mu.Unlock()
+	srvHost := strings.TrimPrefix(srv.URL, "http://")
+	for _, h := range sampled {
+		if h == "gemini-pool" || !strings.HasPrefix(h, "127.0.0.1:") {
+			t.Fatalf("未配置 upstream_host 时 Host 应为 %q，得到 %q", srvHost, h)
+		}
 	}
 }

@@ -43,9 +43,10 @@ type GeminiNode struct {
 	LANURL    string
 	MountPath string
 
-	keyPool    *KeyPool
-	secret     string // X-Proxy-Secret（探测/运行时请求都带）
-	httpClient *http.Client
+	keyPool      *KeyPool
+	secret       string // X-Proxy-Secret（探测/运行时请求都带）
+	httpClient   *http.Client
+	upstreamHost string // 双 conf 部署时子节点 nginx gemini server 块的 server_name；空=不设 Host 头
 
 	status atomic.Int32
 	mu     sync.Mutex
@@ -63,12 +64,17 @@ type GeminiNode struct {
 // newGeminiNode 构造节点并启动后台流程（冷却/宕机恢复、启动探测、Banned 慢速复探）
 func newGeminiNode(cfg config.GeminiNodeConfig, gcfg *config.GeminiConfig, kp *KeyPool, client *http.Client, secret string) *GeminiNode {
 	n := &GeminiNode{
-		Name:       cfg.Name,
-		LANURL:     cfg.LANURL,
-		MountPath:  gcfg.MountPath,
-		keyPool:    kp,
-		secret:     secret,
+		Name:      cfg.Name,
+		LANURL:    cfg.LANURL,
+		MountPath: gcfg.MountPath,
+		keyPool:   kp,
+		secret:    secret,
 		httpClient: client,
+		upstreamHost: cfg.UpstreamHost,
+	}
+	// 节点级为空时继承全局（config.parseGemini 已做，这里兜底直接构造 GeminiConfig 的场景）
+	if n.upstreamHost == "" {
+		n.upstreamHost = gcfg.UpstreamHost
 	}
 	n.status.Store(int32(NodeActive))
 	if len(kp.keys) > 0 {
@@ -102,13 +108,18 @@ func (n *GeminiNode) BaseURL() string { return n.LANURL + n.MountPath }
 // Client 返回节点出站 HTTP 客户端（含可选代理；长流不设整体超时）
 func (n *GeminiNode) Client() *http.Client { return n.httpClient }
 
+// UpstreamHost 双 conf 部署时子节点 nginx gemini server 块的 server_name；空=不设 Host 头（行为同旧）
+func (n *GeminiNode) UpstreamHost() string { return n.upstreamHost }
+
 // KeyCount 该节点绑定的 key 总数（handler 用它作为节点内换 key 上限）
 func (n *GeminiNode) KeyCount() int { return n.keyPool.Len() }
 
 // ==================== key 获取 / 归还 ====================
 
-func (n *GeminiNode) GetNextKey() (*GeminiKey, error) {
-	k, err := n.keyPool.GetNextKey()
+// GetNextKey 按策略选中一个可用 key 并占用；chargeDaily 表示该请求是否消耗 model 的
+// 每日生成配额（countTokens 类端点传 false：不计数、不受耗尽限制）。
+func (n *GeminiNode) GetNextKey(model string, chargeDaily bool) (*GeminiKey, error) {
+	k, err := n.keyPool.GetNextKey(model, chargeDaily)
 	if err != nil {
 		return nil, err
 	}
@@ -126,13 +137,22 @@ func (n *GeminiNode) Report200(k *GeminiKey) {
 	n.keyPool.Report200(k)
 }
 
-// Report429 冷却 key；若该节点所有 key 全部不可用 → 节点短暂冷却，避免雪崩式换 key
-func (n *GeminiNode) Report429(k *GeminiKey) {
+// Report429 分钟级限流（RPM/TPM/未知型 429）：冷却该 key（backoff>0 时优先采用）；
+// 若该节点所有 key 全部不可用 → 节点短暂冷却，避免雪崩式换 key
+func (n *GeminiNode) Report429(k *GeminiKey, backoff time.Duration) {
 	n.Status429.Add(1)
-	n.keyPool.Report429(k)
+	n.keyPool.Report429(k, backoff)
 	if n.keyPool.ReadyCount() == 0 {
 		n.enterCooling()
 	}
+}
+
+// Report429Daily 每日配额（RPD）型 429：该 key 该模型标记耗尽到次日重置时刻。
+// 不触发节点级 Cooling——per-model 耗尽不应波及该节点配额充足的其他模型；
+// 该模型后续请求由 GetNextKey 的内存级判定快速失败，geminiExec 自动换节点。
+func (n *GeminiNode) Report429Daily(k *GeminiKey, model string) {
+	n.Status429.Add(1)
+	n.keyPool.Report429Daily(k, model)
 }
 
 func (n *GeminiNode) Report5xx(k *GeminiKey) {
@@ -200,6 +220,19 @@ func (n *GeminiNode) recoveryLoop() {
 	}
 }
 
+// ApplyOutboundHeaders 设置发往子节点 nginx 的公共出站头：X-Proxy-Secret 鉴权与
+// upstream_host 路由（双 conf 部署时同端口按 server_name 路由）。
+// 所有出站请求（业务转发/健康检查/探测）必须经过这里收口——漏设 Host 会让请求
+// 落入兜底 server 返回 404，触发启动探测把全部 key 误 Ban。
+func (n *GeminiNode) ApplyOutboundHeaders(req *http.Request) {
+	if n.secret != "" {
+		req.Header.Set("X-Proxy-Secret", n.secret)
+	}
+	if n.upstreamHost != "" {
+		req.Host = n.upstreamHost
+	}
+}
+
 // healthCheck 轻量探测节点连通性（nginx 活着即可，200/4xx 均视为健康）
 func (n *GeminiNode) healthCheck() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -208,7 +241,7 @@ func (n *GeminiNode) healthCheck() bool {
 	if err != nil {
 		return false
 	}
-	req.Header.Set("X-Proxy-Secret", n.secret)
+	n.ApplyOutboundHeaders(req)
 	resp, err := n.httpClient.Do(req)
 	if err != nil {
 		return false
@@ -251,7 +284,8 @@ func (n *GeminiNode) reProbeBanned() {
 			if KeyStatus(k.statusIdx.Load()) != KeyStatusBanned {
 				continue
 			}
-			if kind := n.probeKey(k); kind == ErrNone || kind == ErrRateLimit {
+			// 429（含每日配额型）证明 key 本身有效
+			if kind := n.probeKey(k); kind == ErrNone || kind == ErrRateLimit || kind == ErrDailyQuota {
 				k.Unban()
 				log.Printf("[%s] Banned key %s 慢速复探通过，恢复 Active", n.Name, k.ID())
 			}
@@ -271,7 +305,7 @@ func (n *GeminiNode) probeKey(k *GeminiKey) ErrKind {
 		return ErrNone
 	}
 	req.Header.Set("x-goog-api-key", k.Value())
-	req.Header.Set("X-Proxy-Secret", n.secret)
+	n.ApplyOutboundHeaders(req)
 	resp, err := n.httpClient.Do(req)
 	if err != nil {
 		return ErrNone // 网络问题不判定，留给运行时报告
@@ -281,7 +315,7 @@ func (n *GeminiNode) probeKey(k *GeminiKey) ErrKind {
 	return ClassifyGeminiHttp(resp.StatusCode, body)
 }
 
-// applyProbeResult 按探测分类置状态：无效/区域封禁 → Ban；启动即限流 → 冷却
+// applyProbeResult 按探测分类置状态：无效/区域封禁 → Ban；启动即限流（含每日配额型）→ 冷却
 func (n *GeminiNode) applyProbeResult(k *GeminiKey, kind ErrKind) {
 	switch kind {
 	case ErrInvalidKey:
@@ -292,7 +326,7 @@ func (n *GeminiNode) applyProbeResult(k *GeminiKey, kind ErrKind) {
 			n.BannedKeys.Add(1)
 			log.Printf("[%s] key %s 探测无效，置为 Banned", n.Name, k.ID())
 		}
-	case ErrRateLimit:
+	case ErrRateLimit, ErrDailyQuota:
 		log.Printf("[%s] key %s 探测被限流，冷却后重试", n.Name, k.ID())
 		k.Cool(n.keyPool.keyCooldown)
 	case ErrDeterministic:
@@ -314,6 +348,7 @@ type NodeSnapshot struct {
 	LANURL         string        `json:"lan_url"`
 	MountPath      string        `json:"mount_path"`
 	Status         string        `json:"status"`
+	KeyStrategy    string        `json:"key_strategy,omitempty"`
 	TotalRequests  uint64        `json:"total_requests"`
 	Status429      uint64        `json:"status_429"`
 	Status5xx      uint64        `json:"status_5xx"`
@@ -330,6 +365,7 @@ func (n *GeminiNode) Snapshot(includeKeys bool) NodeSnapshot {
 		LANURL:        n.LANURL,
 		MountPath:     n.MountPath,
 		Status:        n.Status().String(),
+		KeyStrategy:   n.keyPool.strategy,
 		TotalRequests: n.TotalRequests.Load(),
 		Status429:     n.Status429.Load(),
 		Status5xx:     n.Status5xx.Load(),

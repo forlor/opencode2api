@@ -236,6 +236,155 @@ gemini:
 	}
 }
 
+// key_strategy / daily_limit / daily_reset_tz / daily_usage_file / upstream_host 解析、默认值与节点级继承
+func TestLoadConfig_GeminiKeyStrategyAndDaily(t *testing.T) {
+	yamlContent := `
+server:
+  port: 22579
+  api_keys: ["sk-1"]
+  secret: "sec"
+default:
+  fallback_model: "x"
+gemini:
+  enabled: true
+  fallback_model: "gemini-2.5-flash"
+  models: ["gemini-*"]
+  key_strategy: "sequential"
+  daily_limit: 20
+  daily_reset_tz: "Asia/Shanghai"
+  daily_usage_file: "custom_usage.json"
+  upstream_host: "gemini-pool"
+  nodes:
+    - name: "n-override"
+      lan_url: "http://10.0.0.1:22578"
+      api_keys: ["AIzaSyA"]
+      key_strategy: "round_robin"
+      daily_limit: 50
+      upstream_host: "host2"
+    - name: "n-inherit"
+      lan_url: "http://10.0.0.2:22578"
+      api_keys: ["AIzaSyB"]
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(yamlContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := cfg.Gemini
+	if g.KeyStrategy != "sequential" {
+		t.Fatalf("key_strategy 应为 sequential，得到 %q", g.KeyStrategy)
+	}
+	if g.DailyLimit != 20 {
+		t.Fatalf("daily_limit 应为 20，得到 %d", g.DailyLimit)
+	}
+	if g.DailyResetTZ != "Asia/Shanghai" {
+		t.Fatalf("daily_reset_tz 应为 Asia/Shanghai，得到 %q", g.DailyResetTZ)
+	}
+	if g.DailyUsageFile != "custom_usage.json" {
+		t.Fatalf("daily_usage_file 应为 custom_usage.json，得到 %q", g.DailyUsageFile)
+	}
+	if g.UpstreamHost != "gemini-pool" {
+		t.Fatalf("upstream_host 应为 gemini-pool，得到 %q", g.UpstreamHost)
+	}
+	o := g.Nodes[0]
+	if o.KeyStrategy != "round_robin" || o.DailyLimit != 50 || o.UpstreamHost != "host2" {
+		t.Fatalf("节点级覆盖未生效: %+v", o)
+	}
+	i := g.Nodes[1]
+	if i.KeyStrategy != "sequential" || i.DailyLimit != 20 || i.UpstreamHost != "gemini-pool" {
+		t.Fatalf("节点应继承全局: %+v", i)
+	}
+}
+
+// 新字段默认值：strategy=round_robin、tz=America/Los_Angeles、usage_file=gemini_daily_usage.json、upstream_host 空
+func TestLoadConfig_GeminiDailyDefaults(t *testing.T) {
+	yamlContent := `
+server:
+  port: 22579
+  api_keys: ["sk-1"]
+default:
+  fallback_model: "x"
+gemini:
+  enabled: true
+  fallback_model: "gemini-2.5-flash"
+  models: ["gemini-*"]
+  key_strategy: "bogus"
+  nodes:
+    - name: "n"
+      lan_url: "http://10.0.0.1:22578"
+      api_keys: ["AIzaSyA"]
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(yamlContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := cfg.Gemini
+	if g.KeyStrategy != "round_robin" {
+		t.Fatalf("非法 key_strategy 应回退 round_robin，得到 %q", g.KeyStrategy)
+	}
+	if g.DailyResetTZ != "America/Los_Angeles" {
+		t.Fatalf("daily_reset_tz 默认应为 America/Los_Angeles，得到 %q", g.DailyResetTZ)
+	}
+	if g.DailyUsageFile != "gemini_daily_usage.json" {
+		t.Fatalf("daily_usage_file 默认应为 gemini_daily_usage.json，得到 %q", g.DailyUsageFile)
+	}
+	if g.UpstreamHost != "" || g.Nodes[0].UpstreamHost != "" {
+		t.Fatalf("upstream_host 默认应为空: %q %q", g.UpstreamHost, g.Nodes[0].UpstreamHost)
+	}
+}
+
+// S1/S4 回归：非法 upstream_host（fail fast 启动报错，避免双 conf 部署下静默落到兜底
+// server 造成 404 误 Ban 全量 key）与非法 daily_reset_tz（LoadLocation 大小写敏感）报错
+func TestLoadConfig_GeminiInvalidHostAndTZFail(t *testing.T) {
+	cases := []struct {
+		name string
+		extra string // 追加到 gemini 段的行
+	}{
+		{"全局 upstream_host 带 scheme", "  upstream_host: \"https://gemini-pool\""},
+		{"全局 upstream_host 带路径", "  upstream_host: \"gemini-pool/path\""},
+		{"节点级 upstream_host 非法", "    upstream_host: \"Has Space:22578\""},
+		{"daily_reset_tz 大小写错误", "  daily_reset_tz: \"asia/shanghai\""},
+		{"daily_reset_tz 不存在的时区", "  daily_reset_tz: \"Mars/Olympus\""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			yamlContent := `
+server:
+  port: 22579
+  api_keys: ["sk-1"]
+default:
+  fallback_model: "x"
+gemini:
+  enabled: true
+  fallback_model: "gemini-2.5-flash"
+  models: ["gemini-*"]
+` + tc.extra + `
+  nodes:
+    - name: "n"
+      lan_url: "http://10.0.0.1:22578"
+      api_keys: ["AIzaSyA"]
+`
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(path, []byte(yamlContent), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if cfg, err := LoadConfig(path); err == nil {
+				t.Fatalf("非法配置应报错，得到 %+v", cfg.Gemini)
+			}
+		})
+	}
+}
+
 func TestLoadConfig_NoGemini_Compatible(t *testing.T) {
 	yamlContent := `
 server:

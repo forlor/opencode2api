@@ -135,6 +135,8 @@ func (r *Router) geminiExec(w http.ResponseWriter, req *http.Request, gBody []by
 	}
 
 	backoff := time.Second // 临时错误指数退避：1s/2s/4s
+	// countTokens 不消耗每日生成配额（Google RPD 只计生成请求），也不受耗尽限制
+	chargeDaily := !strings.HasPrefix(endpoint, ":countTokens")
 	for nodeTry := 0; nodeTry < len(nodes); nodeTry++ {
 		node, err := r.gemPool.GetNextNode()
 		if err != nil {
@@ -144,12 +146,12 @@ func (r *Router) geminiExec(w http.ResponseWriter, req *http.Request, gBody []by
 			continue
 		}
 		for kt := 0; kt < node.KeyCount(); kt++ {
-			key, err := node.GetNextKey()
+			key, err := node.GetNextKey(modelPath, chargeDaily)
 			if err != nil {
 				break // 节点内无可用 key → 换节点
 			}
 
-			httpReq, err := buildGeminiHTTPRequest(req.Context(), node, key, modelPath, endpoint, gBody, r.cfg.Server.Secret)
+			httpReq, err := buildGeminiHTTPRequest(req.Context(), node, key, modelPath, endpoint, gBody)
 			if err != nil {
 				node.ReportConnectionFailure(key)
 				node.ReleaseKey(key)
@@ -183,13 +185,23 @@ func (r *Router) geminiExec(w http.ResponseWriter, req *http.Request, gBody []by
 
 			switch kind {
 			case gemini.ErrRateLimit:
-				node.Report429(key)
+				// 分钟级限流（RPM/TPM/未知型）：优先 Google RetryInfo.retryDelay 精确冷却，回退 key_cooldown
+				backoff, _ := gemini.ParseRetryDelay(errBody)
+				node.Report429(key, backoff)
 				node.ReleaseKey(key)
 				resp.Body.Close()
 				log.Printf("[gemini][%s] key %s 429 限流，换 key", node.Name, key.ID())
 				if !sleepOrAbort(req.Context(), 150*time.Millisecond) {
 					return
 				}
+				continue
+			case gemini.ErrDailyQuota:
+				// 每日配额（RPD）型 429：该 key 该模型标记耗尽到次日重置，直接换 key。
+				// 不退避 sleep——一次请求可能连续耗尽多个 key，避免叠加延迟
+				node.Report429Daily(key, modelPath)
+				node.ReleaseKey(key)
+				resp.Body.Close()
+				log.Printf("[gemini][%s] key %s 模型 %s 当日配额耗尽，已标记至次日重置，换 key", node.Name, key.ID(), modelPath)
 				continue
 			case gemini.ErrInvalidKey:
 				node.ReportInvalidKey(key, "403 API key not valid")
@@ -232,11 +244,12 @@ func (r *Router) geminiExec(w http.ResponseWriter, req *http.Request, gBody []by
 		}
 	}
 
-	writeProxyError(w, http.StatusBadGateway, "proxy_error", "所有 Gemini 节点/key 均不可用（限流或连接失败）")
+	writeProxyError(w, http.StatusBadGateway, "proxy_error", "所有 Gemini 节点/key 均不可用（限流、当日配额耗尽或连接失败）")
 }
 
-// buildGeminiHTTPRequest 构造发往节点 nginx 的 Gemini REST 请求（key 走 Header 不落 access_log）
-func buildGeminiHTTPRequest(ctx context.Context, node *gemini.GeminiNode, key *gemini.GeminiKey, modelPath, endpoint string, body []byte, secret string) (*http.Request, error) {
+// buildGeminiHTTPRequest 构造发往节点 nginx 的 Gemini REST 请求（key 走 Header 不落 access_log）。
+// 鉴权与 upstream_host 路由头统一由 node.ApplyOutboundHeaders 收口。
+func buildGeminiHTTPRequest(ctx context.Context, node *gemini.GeminiNode, key *gemini.GeminiKey, modelPath, endpoint string, body []byte) (*http.Request, error) {
 	u := node.BaseURL() + "/v1beta/models/" + modelPath + endpoint
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
@@ -245,9 +258,7 @@ func buildGeminiHTTPRequest(ctx context.Context, node *gemini.GeminiNode, key *g
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("x-goog-api-key", key.Value())
-	if secret != "" {
-		req.Header.Set("X-Proxy-Secret", secret)
-	}
+	node.ApplyOutboundHeaders(req)
 	return req, nil
 }
 

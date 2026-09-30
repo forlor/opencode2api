@@ -1,9 +1,13 @@
 package config
 
 import (
+	"fmt"
+	"log"
 	"os"
 	"strings"
 	"time"
+
+	_ "time/tzdata" // 内嵌时区库：daily_reset_tz 解析期校验依赖 LoadLocation（Windows 开发机无系统 tzdata）
 
 	"gopkg.in/yaml.v3"
 )
@@ -53,37 +57,46 @@ type RouteDecision struct {
 
 // GeminiConfig 一条独立的 Google AI Studio 号池线路，与顶层 nodes 并行、互不影响
 type GeminiConfig struct {
-	Enabled   bool `yaml:"enabled"`
-	Force     bool `yaml:"force"`       // 调试用：所有请求强制走 Gemini（最高优先级）
-	FallbackModel string `yaml:"fallback_model"` // 未命中时的兜底 Gemini 模型
-	DefaultMaxOutputTokens int   `yaml:"default_max_output_tokens"` // Claude/Responses 缺 max_tokens 时兜底
-	Models       []string `yaml:"models"`        // 目标模型允许列表，支持 "gemini-*" 前缀通配
-	ClientModels []string `yaml:"client_models"` // 可选：客户端模型名直接点名走 Gemini
-	MountPath    string   `yaml:"mount_path"`    // 节点 nginx 挂载前缀，默认 "/gemini"
-	StreamingMode string  `yaml:"streaming_mode"` // "real"|"fake"|""（可由 -real/-fake 后缀覆盖）
-	ForceThinking     bool   `yaml:"force_thinking"`
-	ForceWebSearch    bool   `yaml:"force_web_search"`
-	ForceCodeExecution bool  `yaml:"force_code_execution"`
-	ForceUrlContext   bool   `yaml:"force_url_context"`
-	SafetySettingsThreshold string `yaml:"safety_settings_threshold"` // 默认 "OFF"
-	HTTPProxy        string        `yaml:"http_proxy"`        // 可选全局出站代理
-	KeyCooldownDuration time.Duration `yaml:"key_cooldown_duration"` // 单 key 429 冷却，默认 60s
-	BanAfterFailures int32         `yaml:"ban_after_failures"`   // 连续失败阈值→禁用 key，默认 3
-	MaxRPM           int           `yaml:"max_rpm"`          // 0=不限制
-	MinKeyInterval   time.Duration `yaml:"min_key_interval"` // 0=不限制
+	Enabled                 bool          `yaml:"enabled"`
+	Force                   bool          `yaml:"force"`                     // 调试用：所有请求强制走 Gemini（最高优先级）
+	FallbackModel           string        `yaml:"fallback_model"`            // 未命中时的兜底 Gemini 模型
+	DefaultMaxOutputTokens  int           `yaml:"default_max_output_tokens"` // Claude/Responses 缺 max_tokens 时兜底
+	Models                  []string      `yaml:"models"`                    // 目标模型允许列表，支持 "gemini-*" 前缀通配
+	ClientModels            []string      `yaml:"client_models"`             // 可选：客户端模型名直接点名走 Gemini
+	MountPath               string        `yaml:"mount_path"`                // 节点 nginx 挂载前缀，默认 "/gemini"
+	StreamingMode           string        `yaml:"streaming_mode"`            // "real"|"fake"|""（可由 -real/-fake 后缀覆盖）
+	ForceThinking           bool          `yaml:"force_thinking"`
+	ForceWebSearch          bool          `yaml:"force_web_search"`
+	ForceCodeExecution      bool          `yaml:"force_code_execution"`
+	ForceUrlContext         bool          `yaml:"force_url_context"`
+	SafetySettingsThreshold string        `yaml:"safety_settings_threshold"` // 默认 "OFF"
+	HTTPProxy               string        `yaml:"http_proxy"`                // 可选全局出站代理
+	KeyCooldownDuration     time.Duration `yaml:"key_cooldown_duration"`     // 单 key 429 冷却，默认 60s
+	BanAfterFailures        int32         `yaml:"ban_after_failures"`        // 连续失败阈值→禁用 key，默认 3
+	MaxRPM                  int           `yaml:"max_rpm"`                   // 0=不限制
+	MinKeyInterval          time.Duration `yaml:"min_key_interval"`          // 0=不限制
+
+	KeyStrategy    string `yaml:"key_strategy"`     // round_robin（默认）| sequential（用完一个再换下一个）
+	DailyLimit     int    `yaml:"daily_limit"`      // 每 key 每模型每日生成请求上限，0=不限制
+	DailyResetTZ   string `yaml:"daily_reset_tz"`   // 每日配额重置时区，默认 America/Los_Angeles（Google 免费额度按 PT 午夜重置）
+	DailyUsageFile string `yaml:"daily_usage_file"` // 每日用量持久化文件，默认 gemini_daily_usage.json
+	UpstreamHost   string `yaml:"upstream_host"`    // 双 conf 部署时子节点 nginx gemini server 块的 server_name；空=不设 Host 头（行为同旧）
 
 	Nodes []GeminiNodeConfig `yaml:"nodes"`
 }
 
 // GeminiNodeConfig 一个 Gemini 节点 = 一个 VPS（出口 IP）+ 一组绑定的 Gemini API Key
 type GeminiNodeConfig struct {
-	Name             string        `yaml:"name"`
-	LANURL           string        `yaml:"lan_url"`
-	APIKeys          []string      `yaml:"api_keys"`
-	HTTPProxy        string        `yaml:"http_proxy"`        // 覆盖全局代理
+	Name                string        `yaml:"name"`
+	LANURL              string        `yaml:"lan_url"`
+	APIKeys             []string      `yaml:"api_keys"`
+	HTTPProxy           string        `yaml:"http_proxy"`            // 覆盖全局代理
 	KeyCooldownDuration time.Duration `yaml:"key_cooldown_duration"` // 覆盖全局
-	MaxRPM           int           `yaml:"max_rpm"`           // 覆盖全局
-	MinKeyInterval   time.Duration `yaml:"min_key_interval"`  // 覆盖全局
+	MaxRPM              int           `yaml:"max_rpm"`               // 覆盖全局
+	MinKeyInterval      time.Duration `yaml:"min_key_interval"`      // 覆盖全局
+	KeyStrategy         string        `yaml:"key_strategy"`          // 覆盖全局：round_robin|sequential
+	DailyLimit          int           `yaml:"daily_limit"`           // 覆盖全局：0 表示继承全局
+	UpstreamHost        string        `yaml:"upstream_host"`         // 覆盖全局：空表示继承全局
 }
 
 // ConfigYAML 用于 YAML 的反序列化辅助结构（支持解析字符串格式的时间，如 "30m"）
@@ -112,32 +125,40 @@ type ConfigYAML struct {
 	} `yaml:"nodes"`
 
 	Gemini *struct {
-		Enabled   bool     `yaml:"enabled"`
-		Force     bool     `yaml:"force"`
-		FallbackModel string `yaml:"fallback_model"`
-		DefaultMaxOutputTokens int      `yaml:"default_max_output_tokens"`
-		Models       []string `yaml:"models"`
-		ClientModels []string `yaml:"client_models"`
-		MountPath    string   `yaml:"mount_path"`
-		StreamingMode string  `yaml:"streaming_mode"`
-		ForceThinking     bool   `yaml:"force_thinking"`
-		ForceWebSearch    bool   `yaml:"force_web_search"`
-		ForceCodeExecution bool `yaml:"force_code_execution"`
-		ForceUrlContext   bool   `yaml:"force_url_context"`
-		SafetySettingsThreshold string `yaml:"safety_settings_threshold"`
-		HTTPProxy        string `yaml:"http_proxy"`
-		KeyCooldownDuration string `yaml:"key_cooldown_duration"`
-		BanAfterFailures int32  `yaml:"ban_after_failures"`
-		MaxRPM           int    `yaml:"max_rpm"`
-		MinKeyInterval   string `yaml:"min_key_interval"`
-		Nodes []struct {
-			Name             string   `yaml:"name"`
-			LANURL           string   `yaml:"lan_url"`
-			APIKeys          []string `yaml:"api_keys"`
-			HTTPProxy        string   `yaml:"http_proxy"`
-			KeyCooldownDuration string `yaml:"key_cooldown_duration"`
-			MaxRPM           int      `yaml:"max_rpm"`
-			MinKeyInterval   string   `yaml:"min_key_interval"`
+		Enabled                 bool     `yaml:"enabled"`
+		Force                   bool     `yaml:"force"`
+		FallbackModel           string   `yaml:"fallback_model"`
+		DefaultMaxOutputTokens  int      `yaml:"default_max_output_tokens"`
+		Models                  []string `yaml:"models"`
+		ClientModels            []string `yaml:"client_models"`
+		MountPath               string   `yaml:"mount_path"`
+		StreamingMode           string   `yaml:"streaming_mode"`
+		ForceThinking           bool     `yaml:"force_thinking"`
+		ForceWebSearch          bool     `yaml:"force_web_search"`
+		ForceCodeExecution      bool     `yaml:"force_code_execution"`
+		ForceUrlContext         bool     `yaml:"force_url_context"`
+		SafetySettingsThreshold string   `yaml:"safety_settings_threshold"`
+		HTTPProxy               string   `yaml:"http_proxy"`
+		KeyCooldownDuration     string   `yaml:"key_cooldown_duration"`
+		BanAfterFailures        int32    `yaml:"ban_after_failures"`
+		MaxRPM                  int      `yaml:"max_rpm"`
+		MinKeyInterval          string   `yaml:"min_key_interval"`
+		KeyStrategy             string   `yaml:"key_strategy"`
+		DailyLimit              int      `yaml:"daily_limit"`
+		DailyResetTZ            string   `yaml:"daily_reset_tz"`
+		DailyUsageFile          string   `yaml:"daily_usage_file"`
+		UpstreamHost            string   `yaml:"upstream_host"`
+		Nodes                   []struct {
+			Name                string   `yaml:"name"`
+			LANURL              string   `yaml:"lan_url"`
+			APIKeys             []string `yaml:"api_keys"`
+			HTTPProxy           string   `yaml:"http_proxy"`
+			KeyCooldownDuration string   `yaml:"key_cooldown_duration"`
+			MaxRPM              int      `yaml:"max_rpm"`
+			MinKeyInterval      string   `yaml:"min_key_interval"`
+			KeyStrategy         string   `yaml:"key_strategy"`
+			DailyLimit          int      `yaml:"daily_limit"`
+			UpstreamHost        string   `yaml:"upstream_host"`
 		} `yaml:"nodes"`
 	} `yaml:"gemini"`
 }
@@ -222,7 +243,11 @@ func LoadConfig(path string) (*Config, error) {
 
 	// 解析可选的 Gemini 线路（为 nil 时与旧配置行为完全一致）
 	if raw.Gemini != nil {
-		cfg.Gemini = parseGemini(raw.Gemini)
+		g, err := parseGemini(raw.Gemini)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Gemini = g
 	}
 
 	return cfg, nil
@@ -238,52 +263,93 @@ func parseDurationOr(s string, def time.Duration) time.Duration {
 	return def
 }
 
-// parseGemini 将 YAML 镜像结构转换为 GeminiConfig，并填充默认值
+// validUpstreamHost 校验 upstream_host：裸主机名（可选尾缀端口）。误带 scheme/路径/空白
+// 会让子节点 nginx 的 server_name 匹配失败落入兜底 server，启动探测 404 即误 Ban 全部 key
+// 且 24h 复探无法自愈——后果不可运行期自愈，故在解析期 fail fast。
+func validUpstreamHost(v string) bool {
+	host := v
+	if i := strings.LastIndex(host, ":"); i >= 0 {
+		port := host[i+1:]
+		if port == "" {
+			return false
+		}
+		for _, r := range port {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+		host = host[:i]
+	}
+	if host == "" {
+		return false
+	}
+	for _, r := range host {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// parseGemini 将 YAML 镜像结构转换为 GeminiConfig，并填充默认值。
+// upstream_host / daily_reset_tz 非法时返回 error（fail fast：两者错配的后果
+// 分别是全量 key 误 Ban 与重置边界静默漂移数小时，均无法运行期自愈）。
 func parseGemini(raw *struct {
-	Enabled             bool     `yaml:"enabled"`
-	Force              bool     `yaml:"force"`
-	FallbackModel     string   `yaml:"fallback_model"`
-	DefaultMaxOutputTokens int  `yaml:"default_max_output_tokens"`
-	Models           []string  `yaml:"models"`
-	ClientModels     []string  `yaml:"client_models"`
-	MountPath        string    `yaml:"mount_path"`
-	StreamingMode    string    `yaml:"streaming_mode"`
-	ForceThinking       bool  `yaml:"force_thinking"`
-	ForceWebSearch      bool  `yaml:"force_web_search"`
-	ForceCodeExecution  bool  `yaml:"force_code_execution"`
-	ForceUrlContext     bool  `yaml:"force_url_context"`
-	SafetySettingsThreshold string `yaml:"safety_settings_threshold"`
-	HTTPProxy          string  `yaml:"http_proxy"`
-	KeyCooldownDuration string `yaml:"key_cooldown_duration"`
-	BanAfterFailures  int32   `yaml:"ban_after_failures"`
-	MaxRPM            int     `yaml:"max_rpm"`
-	MinKeyInterval    string  `yaml:"min_key_interval"`
-	Nodes []struct {
-		Name                 string   `yaml:"name"`
-		LANURL               string   `yaml:"lan_url"`
-		APIKeys              []string `yaml:"api_keys"`
-		HTTPProxy            string   `yaml:"http_proxy"`
-		KeyCooldownDuration  string   `yaml:"key_cooldown_duration"`
-		MaxRPM               int      `yaml:"max_rpm"`
-		MinKeyInterval       string   `yaml:"min_key_interval"`
+	Enabled                 bool     `yaml:"enabled"`
+	Force                   bool     `yaml:"force"`
+	FallbackModel           string   `yaml:"fallback_model"`
+	DefaultMaxOutputTokens  int      `yaml:"default_max_output_tokens"`
+	Models                  []string `yaml:"models"`
+	ClientModels            []string `yaml:"client_models"`
+	MountPath               string   `yaml:"mount_path"`
+	StreamingMode           string   `yaml:"streaming_mode"`
+	ForceThinking           bool     `yaml:"force_thinking"`
+	ForceWebSearch          bool     `yaml:"force_web_search"`
+	ForceCodeExecution      bool     `yaml:"force_code_execution"`
+	ForceUrlContext         bool     `yaml:"force_url_context"`
+	SafetySettingsThreshold string   `yaml:"safety_settings_threshold"`
+	HTTPProxy               string   `yaml:"http_proxy"`
+	KeyCooldownDuration     string   `yaml:"key_cooldown_duration"`
+	BanAfterFailures        int32    `yaml:"ban_after_failures"`
+	MaxRPM                  int      `yaml:"max_rpm"`
+	MinKeyInterval          string   `yaml:"min_key_interval"`
+	KeyStrategy             string   `yaml:"key_strategy"`
+	DailyLimit              int      `yaml:"daily_limit"`
+	DailyResetTZ            string   `yaml:"daily_reset_tz"`
+	DailyUsageFile          string   `yaml:"daily_usage_file"`
+	UpstreamHost            string   `yaml:"upstream_host"`
+	Nodes                   []struct {
+		Name                string   `yaml:"name"`
+		LANURL              string   `yaml:"lan_url"`
+		APIKeys             []string `yaml:"api_keys"`
+		HTTPProxy           string   `yaml:"http_proxy"`
+		KeyCooldownDuration string   `yaml:"key_cooldown_duration"`
+		MaxRPM              int      `yaml:"max_rpm"`
+		MinKeyInterval      string   `yaml:"min_key_interval"`
+		KeyStrategy         string   `yaml:"key_strategy"`
+		DailyLimit          int      `yaml:"daily_limit"`
+		UpstreamHost        string   `yaml:"upstream_host"`
 	} `yaml:"nodes"`
-}) *GeminiConfig {
+}) (*GeminiConfig, error) {
 	g := &GeminiConfig{
-		Enabled:                raw.Enabled,
-		Force:                  raw.Force,
-		FallbackModel:          raw.FallbackModel,
-		Models:                 raw.Models,
-		ClientModels:           raw.ClientModels,
-		MountPath:              raw.MountPath,
-		StreamingMode:          raw.StreamingMode,
-		ForceThinking:          raw.ForceThinking,
-		ForceWebSearch:         raw.ForceWebSearch,
-		ForceCodeExecution:     raw.ForceCodeExecution,
-		ForceUrlContext:        raw.ForceUrlContext,
+		Enabled:                 raw.Enabled,
+		Force:                   raw.Force,
+		FallbackModel:           raw.FallbackModel,
+		Models:                  raw.Models,
+		ClientModels:            raw.ClientModels,
+		MountPath:               raw.MountPath,
+		StreamingMode:           raw.StreamingMode,
+		ForceThinking:           raw.ForceThinking,
+		ForceWebSearch:          raw.ForceWebSearch,
+		ForceCodeExecution:      raw.ForceCodeExecution,
+		ForceUrlContext:         raw.ForceUrlContext,
 		SafetySettingsThreshold: raw.SafetySettingsThreshold,
-		HTTPProxy:              raw.HTTPProxy,
-		BanAfterFailures:       raw.BanAfterFailures,
-		MaxRPM:                 raw.MaxRPM,
+		HTTPProxy:               raw.HTTPProxy,
+		BanAfterFailures:        raw.BanAfterFailures,
+		MaxRPM:                  raw.MaxRPM,
 	}
 
 	if g.FallbackModel == "" {
@@ -307,6 +373,32 @@ func parseGemini(raw *struct {
 	g.KeyCooldownDuration = parseDurationOr(raw.KeyCooldownDuration, 60*time.Second)
 	g.MinKeyInterval = parseDurationOr(raw.MinKeyInterval, 0)
 
+	// key 选择策略：空或非法一律 round_robin（兼容旧行为）
+	g.KeyStrategy = raw.KeyStrategy
+	if g.KeyStrategy != "sequential" {
+		if g.KeyStrategy != "" && g.KeyStrategy != "round_robin" {
+			log.Printf("[gemini] key_strategy %q 非法（仅支持 round_robin|sequential），回退 round_robin", raw.KeyStrategy)
+		}
+		g.KeyStrategy = "round_robin"
+	}
+	g.DailyLimit = raw.DailyLimit
+	g.DailyResetTZ = raw.DailyResetTZ
+	if g.DailyResetTZ == "" {
+		g.DailyResetTZ = "America/Los_Angeles" // Google 免费额度按太平洋时间午夜重置
+	} else if _, err := time.LoadLocation(g.DailyResetTZ); err != nil {
+		// LoadLocation 大小写敏感（"asia/shanghai" 即失败），只回退 UTC 会把重置边界
+		// 静默漂移数小时，且运行期仅启动日志一行——解析期直接报错
+		return nil, fmt.Errorf("gemini.daily_reset_tz %q 非法（应为 IANA 时区名，注意大小写，如 Asia/Shanghai）: %w", g.DailyResetTZ, err)
+	}
+	g.DailyUsageFile = raw.DailyUsageFile
+	if g.DailyUsageFile == "" {
+		g.DailyUsageFile = "gemini_daily_usage.json"
+	}
+	g.UpstreamHost = raw.UpstreamHost
+	if g.UpstreamHost != "" && !validUpstreamHost(g.UpstreamHost) {
+		return nil, fmt.Errorf("gemini.upstream_host %q 非法（应为裸主机名，可带端口；不能含 scheme 或路径）", g.UpstreamHost)
+	}
+
 	for _, rawNode := range raw.Nodes {
 		node := GeminiNodeConfig{
 			Name:      rawNode.Name,
@@ -320,10 +412,28 @@ func parseGemini(raw *struct {
 		}
 		node.KeyCooldownDuration = parseDurationOr(rawNode.KeyCooldownDuration, g.KeyCooldownDuration)
 		node.MinKeyInterval = parseDurationOr(rawNode.MinKeyInterval, g.MinKeyInterval)
+		// 节点级覆盖：空/0 表示继承全局
+		node.KeyStrategy = rawNode.KeyStrategy
+		if node.KeyStrategy == "" {
+			node.KeyStrategy = g.KeyStrategy
+		} else if node.KeyStrategy != "round_robin" && node.KeyStrategy != "sequential" {
+			log.Printf("[gemini] 节点 %s key_strategy %q 非法，回退全局 %q", node.Name, rawNode.KeyStrategy, g.KeyStrategy)
+			node.KeyStrategy = g.KeyStrategy
+		}
+		node.DailyLimit = rawNode.DailyLimit
+		if node.DailyLimit <= 0 {
+			node.DailyLimit = g.DailyLimit
+		}
+		node.UpstreamHost = rawNode.UpstreamHost
+		if node.UpstreamHost == "" {
+			node.UpstreamHost = g.UpstreamHost
+		} else if !validUpstreamHost(node.UpstreamHost) {
+			return nil, fmt.Errorf("gemini.nodes[%s].upstream_host %q 非法（应为裸主机名，可带端口；不能含 scheme 或路径）", node.Name, node.UpstreamHost)
+		}
 		g.Nodes = append(g.Nodes, node)
 	}
 
-	return g
+	return g, nil
 }
 
 // GetMappedModel 根据客户端发来的模型名称，动态查询对应映射的目标模型；若未匹配则使用 fallback_model 兜底

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -33,6 +34,15 @@ func main() {
 	}
 
 	log.Printf("成功加载配置，配置节点数: %d，主服务端口: %d", len(cfg.Nodes), cfg.Server.Port)
+
+	// gemini.daily_usage_file 为相对路径时按 config 文件所在目录解析：
+	// 否则随进程启动目录漂移（systemd WorkingDirectory 变更/手动 cd 后启动），
+	// 用量恢复静默换文件，当日计数与耗尽标记全部丢失
+	if cfg.Gemini != nil && cfg.Gemini.DailyUsageFile != "" && !filepath.IsAbs(cfg.Gemini.DailyUsageFile) {
+		if absCfg, err := filepath.Abs(configPath); err == nil {
+			cfg.Gemini.DailyUsageFile = filepath.Join(filepath.Dir(absCfg), cfg.Gemini.DailyUsageFile)
+		}
+	}
 
 	// 初始化节点调度池
 	pool := proxy.NewPool(cfg)
@@ -80,6 +90,10 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("优雅关闭失败: %v", err)
+	}
+	// Gemini 每日用量同步落盘（未启用持久化时为空操作）
+	if gemPool != nil {
+		gemPool.FlushDailyUsage()
 	}
 	log.Println("服务已退出")
 }
